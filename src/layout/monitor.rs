@@ -713,6 +713,12 @@ impl<W: LayoutElement> Monitor<W> {
         self.options = options;
     }
 
+    pub fn update_shaders(&mut self) {
+        for ws in &mut self.workspaces {
+            ws.update_shaders();
+        }
+    }
+
     pub fn move_workspace_down(&mut self) {
         let mut new_idx = min(self.active_workspace_idx + 1, self.workspaces.len() - 1);
         if new_idx == self.active_workspace_idx {
@@ -1034,6 +1040,10 @@ impl<W: LayoutElement> Monitor<W> {
             self.clean_up_workspaces();
             return true;
         }
+
+        // Take into account any idle time between the last event and now.
+        let now = self.clock.now_unadjusted();
+        gesture.tracker.push(0., now);
 
         let total_height = if gesture.is_touchpad {
             WORKSPACE_GESTURE_MOVEMENT
