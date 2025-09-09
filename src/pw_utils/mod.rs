@@ -4,9 +4,7 @@ use std::io::Cursor;
 use std::iter::zip;
 use std::mem;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
-use std::os::unix::io::RawFd;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -16,8 +14,7 @@ use pipewire::context::Context;
 use pipewire::core::{Core, PW_ID_CORE};
 use pipewire::main_loop::MainLoop;
 use pipewire::properties::Properties;
-use pipewire::spa::buffer::{DataType, SyncTimelineRef};
-use pipewire::spa::drm::{create_drm_syncobj_timeline, drm_syncobj_handle_to_fd, find_drm_device_fd};
+use pipewire::spa::buffer::DataType;
 use pipewire::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
 use pipewire::spa::param::format_utils::parse_format;
 use pipewire::spa::param::video::{VideoFormat, VideoInfoRaw};
@@ -85,16 +82,8 @@ pub struct Cast {
     min_time_between_frames: Rc<Cell<Duration>>,
     dmabufs: Rc<RefCell<HashMap<i64, Dmabuf>>>,
     scheduled_redraw: Option<RegistrationToken>,
-    sync_timeline: Option<SyncTimelineRef>,
-
-    // DRM syncobj timeline file descriptors for linux-drm-syncobj-v1
-    acquire_timeline_fd: Option<RawFd>,
-    release_timeline_fd: Option<RawFd>,
-    drm_device_fd: Option<RawFd>,
-
-    // FIXME: Need proper implementation of buffer state
+    // Simplified buffer tracking for frame pacing (explicit sync handled by pipewire-rs)
     buffers: Vec<BufferState>,
-    current_release_point: u64,
 }
 
 #[derive(Debug)]
@@ -255,20 +244,23 @@ impl PipeWire {
                                 let _span = tracy_client::span!("sending PipeWireStreamAdded");
                                 let signal_ctx = signal_ctx.clone();
                                 let stop_cast = stop_cast.clone();
-                                
-                                // Spawn the async task using calloop's scheduler
-                                scheduler.schedule(async move {
-                                    let res = mutter_screen_cast::Stream::pipe_wire_stream_added(
-                                        &signal_ctx,
-                                        id,
-                                    )
-                                    .await;
 
-                                    if let Err(err) = res {
-                                        warn!("error sending PipeWireStreamAdded: {err:?}");
-                                        stop_cast();
-                                    }
-                                }).unwrap();
+                                // Spawn the async task using calloop's scheduler
+                                scheduler
+                                    .schedule(async move {
+                                        let res =
+                                            mutter_screen_cast::Stream::pipe_wire_stream_added(
+                                                &signal_ctx,
+                                                id,
+                                            )
+                                            .await;
+
+                                        if let Err(err) = res {
+                                            warn!("error sending PipeWireStreamAdded: {err:?}");
+                                            stop_cast();
+                                        }
+                                    })
+                                    .unwrap();
                             }
 
                             is_active.set(false);
@@ -409,10 +401,10 @@ impl PipeWire {
                         };
 
                         debug!(
-            "pw stream: allocation successful \
+                            "pw stream: allocation successful \
  (modifier={modifier:?}, plane_count={plane_count}), \
  moving to confirmation pending"
-        );
+                        );
 
                         *state = CastState::ConfirmationPending {
                             size: format_size,
@@ -469,31 +461,31 @@ impl PipeWire {
                             ..
                         } if *alpha == format_has_alpha
                             && *modifier == Modifier::from(format.modifier()) =>
-                            {
-                                let size = *size;
-                                let alpha = *alpha;
-                                let modifier = *modifier;
-                                let plane_count = *plane_count;
+                        {
+                            let size = *size;
+                            let alpha = *alpha;
+                            let modifier = *modifier;
+                            let plane_count = *plane_count;
 
-                                let damage_tracker =
-                                    if let CastState::Ready { damage_tracker, .. } = &mut *state {
-                                        damage_tracker.take()
-                                    } else {
-                                        None
-                                    };
-
-                                debug!("pw stream: moving to ready state");
-
-                                *state = CastState::Ready {
-                                    size,
-                                    alpha,
-                                    modifier,
-                                    plane_count,
-                                    damage_tracker,
+                            let damage_tracker =
+                                if let CastState::Ready { damage_tracker, .. } = &mut *state {
+                                    damage_tracker.take()
+                                } else {
+                                    None
                                 };
 
-                                plane_count
-                            }
+                            debug!("pw stream: moving to ready state");
+
+                            *state = CastState::Ready {
+                                size,
+                                alpha,
+                                modifier,
+                                plane_count,
+                                damage_tracker,
+                            };
+
+                            plane_count
+                        }
                         _ => {
                             // We're negotiating a single modifier, or alpha or modifier changed,
                             // so we need to do a test allocation.
@@ -512,10 +504,10 @@ impl PipeWire {
                             };
 
                             debug!(
-"pw stream: allocation successful \
+                                "pw stream: allocation successful \
 (modifier={modifier:?}, plane_count={plane_count}), \
 moving to ready"
-);
+                            );
 
                             *state = CastState::Ready {
                                 size: format_size,
@@ -526,40 +518,40 @@ moving to ready"
                             };
 
                             plane_count as i32
-                        },
+                        }
                     };
 
                     // Create buffer parameters
                     let o1 = pod::object!(
-        SpaTypes::ObjectParamBuffers,
-        ParamType::Buffers,
-        Property::new(
-            SPA_PARAM_BUFFERS_buffers,
-            pod::Value::Choice(ChoiceValue::Int(Choice(
-                ChoiceFlags::empty(),
-                ChoiceEnum::Range {
-                    default: 16,
-                    min: 2,
-                    max: 16
-                }
-            ))),
-        ),
-        Property::new(SPA_PARAM_BUFFERS_blocks, pod::Value::Int(plane_count)),
-        Property::new(
-            SPA_PARAM_BUFFERS_dataType,
-            pod::Value::Choice(ChoiceValue::Int(Choice(
-                ChoiceFlags::empty(),
-                ChoiceEnum::Flags {
-                    default: 1 << DataType::DmaBuf.as_raw(),
-                    flags: vec![1 << DataType::DmaBuf.as_raw()],
-                },
-            ))),
-        ),
-        Property::new(
-            SPA_PARAM_META_type,
-            pod::Value::Id(Id(SPA_META_SyncTimeline))
-        ),
-    );
+                        SpaTypes::ObjectParamBuffers,
+                        ParamType::Buffers,
+                        Property::new(
+                            SPA_PARAM_BUFFERS_buffers,
+                            pod::Value::Choice(ChoiceValue::Int(Choice(
+                                ChoiceFlags::empty(),
+                                ChoiceEnum::Range {
+                                    default: 16,
+                                    min: 2,
+                                    max: 16
+                                }
+                            ))),
+                        ),
+                        Property::new(SPA_PARAM_BUFFERS_blocks, pod::Value::Int(plane_count)),
+                        Property::new(
+                            SPA_PARAM_BUFFERS_dataType,
+                            pod::Value::Choice(ChoiceValue::Int(Choice(
+                                ChoiceFlags::empty(),
+                                ChoiceEnum::Flags {
+                                    default: 1 << DataType::DmaBuf.as_raw(),
+                                    flags: vec![1 << DataType::DmaBuf.as_raw()],
+                                },
+                            ))),
+                        ),
+                        Property::new(
+                            SPA_PARAM_META_type,
+                            pod::Value::Id(Id(SPA_META_SyncTimeline))
+                        ),
+                    );
 
                     let mut b1 = vec![];
                     let mut params = [make_pod(&mut b1, o1)];
@@ -683,82 +675,36 @@ moving to ready"
             min_time_between_frames,
             dmabufs,
             scheduled_redraw: None,
-            sync_timeline: None,
-            acquire_timeline_fd: None,
-            release_timeline_fd: None,
-            drm_device_fd: None,
             buffers: Vec::new(),
-            current_release_point: 0,
         };
 
         Ok(cast)
     }
 }
 
+/// Simplified buffer state for frame pacing and basic tracking
+///
+/// pipewire-rs handles explicit sync internally, we just track for performance metrics
+#[derive(Debug)]
 struct BufferState {
-    _buffer_id: i64,  // Use fd as the buffer identifier instead of storing Buffer
-    acquire_point: u64,
-    release_point: u64,
-    is_queued: bool,
+    buffer_id: i64,
+    queued_at: Duration,
 }
 
 impl BufferState {
-    fn new(_buffer_id: i64, acquire_point: u64) -> Self {
+    fn new(buffer_id: i64) -> Self {
         Self {
-            _buffer_id,
-            acquire_point,
-            release_point: 0,
-            is_queued: true,
+            buffer_id,
+            queued_at: crate::utils::get_monotonic_time(),
         }
+    }
+
+    fn age(&self) -> Duration {
+        crate::utils::get_monotonic_time().saturating_sub(self.queued_at)
     }
 }
 
-
 impl Cast {
-    /// Initialize DRM syncobj timeline objects for linux-drm-syncobj-v1
-    pub fn initialize_drm_timelines(&mut self) -> anyhow::Result<()> {
-        if self.acquire_timeline_fd.is_some() && self.release_timeline_fd.is_some() {
-            return Ok(()); // Already initialized
-        }
-
-        // Find or use cached DRM device
-        let drm_device_fd = match self.drm_device_fd {
-            Some(fd) => fd,
-            None => {
-                let device = find_drm_device_fd()?;
-                let fd = device.as_raw_fd();
-                self.drm_device_fd = Some(fd);
-                // Keep the device alive by storing it
-                // TODO: Store the DrmDeviceFd properly to avoid leaking
-                std::mem::forget(device);
-                fd
-            }
-        };
-
-        // Create acquire timeline
-        if self.acquire_timeline_fd.is_none() {
-            let acquire_handle = create_drm_syncobj_timeline(drm_device_fd)
-                .context("Failed to create acquire timeline syncobj")?;
-            let acquire_fd = drm_syncobj_handle_to_fd(drm_device_fd, acquire_handle)
-                .context("Failed to export acquire timeline to FD")?;
-            self.acquire_timeline_fd = Some(acquire_fd);
-        }
-
-        // Create release timeline  
-        if self.release_timeline_fd.is_none() {
-            let release_handle = create_drm_syncobj_timeline(drm_device_fd)
-                .context("Failed to create release timeline syncobj")?;
-            let release_fd = drm_syncobj_handle_to_fd(drm_device_fd, release_handle)
-                .context("Failed to export release timeline to FD")?;
-            self.release_timeline_fd = Some(release_fd);
-        }
-
-        debug!("DRM syncobj timelines initialized: acquire_fd={:?}, release_fd={:?}", 
-               self.acquire_timeline_fd, self.release_timeline_fd);
-
-        Ok(())
-    }
-
     pub fn ensure_size(&mut self, size: Size<i32, Physical>) -> anyhow::Result<CastSizeChange> {
         let new_size = Size::from((size.w as u32, size.h as u32));
 
@@ -908,65 +854,21 @@ impl Cast {
         }
     }
 
-    /// Updates sync timeline with a new monotonically increasing point value for linux-drm-syncobj-v1
-    async fn update_sync_timeline(&mut self) -> Option<u64> {
-        if let Some(sync_timeline) = self.sync_timeline.as_mut() {
-            static COUNTER: AtomicU64 = AtomicU64::new(1);
-            let point = COUNTER.fetch_add(2, Ordering::SeqCst); // Increment by 2 for acquire/release pair
-            
-            // Set acquire point for this frame
-            if let Err(err) = sync_timeline.set_acquire_point(point).await {
-                warn!("Failed to set acquire point: {:?}", err);
-                return None;
-            }
-            
-            // Set release point for this frame (next timeline point)
-            if let Err(err) = sync_timeline.signal_release(point + 1).await {
-                warn!("Failed to set release point: {:?}", err);
-                return None;
-            }
-            
-            Some(point)
-        } else {
-            None
-        }
-    }
-    
-    /// Update buffer tracking with latest release points from PipeWire
-    fn update_released_buffers(&mut self) {
-        if let Some(timeline) = &self.sync_timeline {
-            let release_point = timeline.release_point();
-
-            if release_point > self.current_release_point {
-                self.current_release_point = release_point;
-
-                // Update status of individual buffers
-                for buffer in &mut self.buffers {
-                    if buffer.is_queued && buffer.acquire_point <= release_point {
-                        buffer.is_queued = false;
-                        buffer.release_point = release_point;
-                    }
-                }
-            }
-        }
-    }
-
-    /// Clean up buffer states that are no longer needed
+    /// Simple buffer cleanup for performance tracking
     fn cleanup_buffer_states(&mut self) {
-        // Remove buffer states that are no longer queued and have been properly released
-        self.buffers.retain(|state|
-            state.is_queued || state.release_point == 0
-        );
+        const MAX_BUFFER_AGE: Duration = Duration::from_secs(10);
+        const MAX_BUFFERS: usize = 16;
 
-        // Limit the number of tracked buffers to prevent memory leaks
-        if self.buffers.len() > 64 {
-            // Keep only the most recently used buffers
-            self.buffers.sort_by_key(|state| std::cmp::Reverse(state.acquire_point));
-            self.buffers.truncate(32);
+        // Remove old buffers
+        self.buffers.retain(|state| state.age() < MAX_BUFFER_AGE);
+
+        // Limit total count
+        if self.buffers.len() > MAX_BUFFERS {
+            self.buffers
+                .sort_by_key(|state| std::cmp::Reverse(state.queued_at));
+            self.buffers.truncate(MAX_BUFFERS);
         }
     }
-
-
 
     pub async fn dequeue_buffer_and_render(
         &mut self,
@@ -997,12 +899,7 @@ impl Cast {
             return Ok(false);
         }
 
-        // Check for released buffers before requesting a new one
-        self.update_released_buffers();
-
-        // Get acquire point from timeline - this is our producer role
-        let acquire_point = self.update_sync_timeline().await.unwrap_or(0);
-
+        // Use pipewire-rs built-in explicit sync support
         let Some(mut buffer) = self.stream.dequeue_buffer_with_sync().await? else {
             return Ok(false);
         };
@@ -1020,7 +917,7 @@ impl Cast {
             elements.iter().rev(),
         )?;
 
-        // Always wait for GPU completion for proper timeline synchronization
+        // Wait for GPU completion
         let _span = span!("wait for completion");
         if let Err(err) = sync_point.wait() {
             warn!("error waiting for GPU rendering: {:?}", err);
@@ -1029,32 +926,19 @@ impl Cast {
         // Update buffer chunks with stride and offset information
         self.update_buffer_chunks(buffer.datas_mut(), &dmabuf);
 
-        // Save buffer_id and acquire_point before dropping buffer
-        let buffer_id = fd;
+        // Save buffer ID before dropping
+        let buffer_fd = fd;
 
-        // Explicitly drop the buffer here to release the immutable borrow of self.stream
+        // Explicitly drop the buffer to release borrow before mutable operations
         drop(buffer);
 
-        // Now we can safely call mutable methods on self
-        // Initialize DRM timelines if needed and perform sync
-        if let Err(err) = self.initialize_drm_timelines() {
-            warn!("Failed to initialize DRM timelines: {:?}", err);
-        } else if let (Some(acquire_fd), Some(release_fd)) = (self.acquire_timeline_fd, self.release_timeline_fd) {
-            if let Some(ref sync_timeline) = self.sync_timeline {
-                if let Err(err) = sync_timeline.sync_dma_buf(acquire_fd, release_fd).await {
-                    warn!("Failed to sync DMA-BUF with timeline: {:?}", err);
-                }
-            }
-        }
-
-        self.buffers.push(BufferState::new(buffer_id, acquire_point));
-
+        // Track buffer for performance metrics
+        self.buffers.push(BufferState::new(buffer_fd));
         self.last_frame_time = get_monotonic_time();
         self.cleanup_buffer_states();
 
         Ok(true)
     }
-
 
     pub async fn dequeue_buffer_and_clear(
         &mut self,
@@ -1067,9 +951,7 @@ impl Cast {
             }
         }
 
-        // Get acquire point from timeline - now properly async
-        let acquire_point = self.update_sync_timeline().await.unwrap_or(0);
-
+        // Use pipewire-rs built-in explicit sync support
         let Some(mut buffer) = self.stream.dequeue_buffer_with_sync().await? else {
             return Ok(false);
         };
@@ -1080,7 +962,6 @@ impl Cast {
 
         match clear_dmabuf(renderer, dmabuf.clone()) {
             Ok(sync_point) => {
-                // Always wait for GPU completion for proper timeline synchronization
                 let _span = tracy_client::span!("wait for completion");
                 if let Err(err) = sync_point.wait() {
                     warn!("error waiting for pw frame completion: {err:?}");
@@ -1095,38 +976,18 @@ impl Cast {
         // Update buffer chunks with stride and offset information
         self.update_buffer_chunks(buffer.datas_mut(), &dmabuf);
 
-        // Save buffer_id before dropping buffer
-        let buffer_id = fd_i64;
+        // Save buffer ID before dropping
+        let buffer_fd = fd_i64;
 
-        // Explicitly drop the buffer here to release the immutable borrow of self.stream
+        // Explicitly drop the buffer to release borrow before mutable operations
         drop(buffer);
 
-        // Now we can safely call mutable methods on self
-        // Initialize DRM timelines if needed and perform sync
-        if let Err(err) = self.initialize_drm_timelines() {
-            warn!("Failed to initialize DRM timelines: {:?}", err);
-        } else if let (Some(acquire_fd), Some(release_fd)) = (self.acquire_timeline_fd, self.release_timeline_fd) {
-            if let Some(ref sync_timeline) = self.sync_timeline {
-                if let Err(err) = sync_timeline.sync_dma_buf(acquire_fd, release_fd).await {
-                    warn!("Failed to sync DMA-BUF with timeline: {:?}", err);
-                }
-            }
-        }
-
-        // Now we can safely perform mutable operations on self
-        self.buffers.push(BufferState::new(buffer_id, acquire_point));
-
-        // Update last frame time for frame pacing
+        // Track buffer for performance metrics
+        self.buffers.push(BufferState::new(buffer_fd));
         self.last_frame_time = get_monotonic_time();
         self.cleanup_buffer_states();
 
         Ok(true)
-    }
-
-
-
-    pub fn set_sync_timeline(&mut self, timeline: SyncTimelineRef) {
-        self.sync_timeline = Some(timeline);
     }
 }
 

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use niri_config::{Config, ModKey};
 use smithay::backend::allocator::dmabuf::Dmabuf;
+use smithay::backend::drm::exporter::gbm::NodeFilter;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -39,6 +40,10 @@ pub enum RenderResult {
 pub type IpcOutputMap = HashMap<OutputId, niri_ipc::Output>;
 
 static OUTPUT_ID_COUNTER: IdCounter = IdCounter::new();
+
+pub fn drm_node_filter() -> NodeFilter {
+    NodeFilter::All
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OutputId(u64);
@@ -162,6 +167,14 @@ impl Backend {
     {
         match self {
             Backend::Tty(tty) => tty.primary_gbm_device(),
+            Backend::Winit(_) => None,
+            Backend::Headless(_) => None,
+        }
+    }
+
+    pub fn primary_drm_device_fd(&self) -> Option<smithay::backend::drm::DrmDeviceFd> {
+        match self {
+            Backend::Tty(tty) => tty.primary_drm_device_fd(),
             Backend::Winit(_) => None,
             Backend::Headless(_) => None,
         }

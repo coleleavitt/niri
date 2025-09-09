@@ -77,6 +77,7 @@ use smithay::wayland::compositor::{
 };
 use smithay::wayland::cursor_shape::CursorShapeManagerState;
 use smithay::wayland::dmabuf::DmabufState;
+use smithay::wayland::drm_syncobj::{DrmSyncobjState, supports_syncobj_eventfd};
 use smithay::wayland::fractional_scale::FractionalScaleManagerState;
 use smithay::wayland::idle_inhibit::IdleInhibitManagerState;
 use smithay::wayland::idle_notify::IdleNotifierState;
@@ -263,6 +264,7 @@ pub struct Niri {
     pub shm_state: ShmState,
     pub output_manager_state: OutputManagerState,
     pub dmabuf_state: DmabufState,
+    pub drm_syncobj_state: Option<DrmSyncobjState>,
     pub fractional_scale_manager_state: FractionalScaleManagerState,
     pub seat_state: SeatState<State>,
     pub tablet_state: TabletManagerState,
@@ -2140,6 +2142,28 @@ impl Niri {
         let output_manager_state =
             OutputManagerState::new_with_xdg_output::<State>(&display_handle);
         let dmabuf_state = DmabufState::new();
+
+        // Initialize DRM syncobj state conditionally based on backend type
+        let drm_syncobj_state = match &backend {
+            Backend::Tty(_) => {
+                if let Some(device_fd) = backend.primary_drm_device_fd() {
+                    if supports_syncobj_eventfd(&device_fd) {
+                        debug!("DRM syncobj eventfd supported, enabling explicit sync protocol");
+                        Some(DrmSyncobjState::new::<State>(&display_handle, device_fd))
+                    } else {
+                        debug!("DRM syncobj eventfd not supported, explicit sync protocol disabled");
+                        None
+                    }
+                } else {
+                    debug!("No primary DRM device available, explicit sync protocol disabled");
+                    None
+                }
+            }
+            Backend::Winit(_) | Backend::Headless(_) => {
+                debug!("Non-DRM backend, explicit sync protocol disabled");
+                None
+            }
+        };
         let fractional_scale_manager_state =
             FractionalScaleManagerState::new::<State>(&display_handle);
         let mut seat_state = SeatState::new();
@@ -2381,6 +2405,7 @@ impl Niri {
             shm_state,
             output_manager_state,
             dmabuf_state,
+            drm_syncobj_state,
             fractional_scale_manager_state,
             seat_state,
             tablet_state,
@@ -4352,6 +4377,7 @@ impl Niri {
                 subpixel: Subpixel::Unknown,
                 make: String::new(),
                 model: String::new(),
+                serial_number: String::new(),
             },
         );
         let output = &output;

@@ -28,6 +28,7 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 use smithay::wayland::compositor::{get_parent, with_states};
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
+use smithay::wayland::drm_syncobj::{DrmSyncobjHandler, DrmSyncobjState};
 use smithay::wayland::drm_lease::{
     DrmLease, DrmLeaseBuilder, DrmLeaseHandler, DrmLeaseRequest, DrmLeaseState, LeaseRejected,
 };
@@ -66,7 +67,7 @@ use smithay::wayland::xdg_activation::{
 };
 use smithay::{
     delegate_cursor_shape, delegate_data_control, delegate_data_device, delegate_dmabuf,
-    delegate_drm_lease, delegate_ext_data_control, delegate_fractional_scale,
+    delegate_drm_lease, delegate_drm_syncobj, delegate_ext_data_control, delegate_fractional_scale,
     delegate_idle_inhibit, delegate_idle_notify, delegate_input_method_manager,
     delegate_keyboard_shortcuts_inhibit, delegate_output, delegate_pointer_constraints,
     delegate_pointer_gestures, delegate_presentation, delegate_primary_selection,
@@ -309,8 +310,8 @@ impl SelectionHandler for State {
 }
 
 impl DataDeviceHandler for State {
-    fn data_device_state(&self) -> &DataDeviceState {
-        &self.niri.data_device_state
+    fn data_device_state(&mut self) -> &mut DataDeviceState {
+        &mut self.niri.data_device_state
     }
 }
 
@@ -389,23 +390,23 @@ impl ServerDndGrabHandler for State {}
 delegate_data_device!(State);
 
 impl PrimarySelectionHandler for State {
-    fn primary_selection_state(&self) -> &PrimarySelectionState {
-        &self.niri.primary_selection_state
+    fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
+        &mut self.niri.primary_selection_state
     }
 }
 delegate_primary_selection!(State);
 
 impl WlrDataControlHandler for State {
-    fn data_control_state(&self) -> &WlrDataControlState {
-        &self.niri.wlr_data_control_state
+    fn data_control_state(&mut self) -> &mut WlrDataControlState {
+        &mut self.niri.wlr_data_control_state
     }
 }
 
 delegate_data_control!(State);
 
 impl ExtDataControlHandler for State {
-    fn data_control_state(&self) -> &ExtDataControlState {
-        &self.niri.ext_data_control_state
+    fn data_control_state(&mut self) -> &mut ExtDataControlState {
+        &mut self.niri.ext_data_control_state
     }
 }
 
@@ -439,6 +440,13 @@ impl DmabufHandler for State {
     }
 }
 delegate_dmabuf!(State);
+
+impl DrmSyncobjHandler for State {
+    fn drm_syncobj_state(&mut self) -> Option<&mut DrmSyncobjState> {
+        self.niri.drm_syncobj_state.as_mut()
+    }
+}
+delegate_drm_syncobj!(State);
 
 impl SessionLockHandler for State {
     fn lock_state(&mut self) -> &mut SessionLockManagerState {

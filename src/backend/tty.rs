@@ -19,6 +19,7 @@ use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags, PrimaryPlaneElement};
+use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::{
     DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata, DrmEventTime, DrmNode, NodeType, VrrSupport,
 };
@@ -115,7 +116,7 @@ pub type TtyRendererError<'render> = <TtyRenderer<'render> as RendererSuper>::Er
 
 type GbmDrmCompositor = DrmCompositor<
     GbmAllocator<DrmDeviceFd>,
-    GbmDevice<DrmDeviceFd>,
+    GbmFramebufferExporter<DrmDeviceFd>,
     (OutputPresentationFeedback, Duration),
     DrmDeviceFd,
 >;
@@ -920,6 +921,7 @@ impl Tty {
                 subpixel: connector.subpixel().into(),
                 model: output_name.model.as_deref().unwrap_or("Unknown").to_owned(),
                 make: output_name.make.as_deref().unwrap_or("Unknown").to_owned(),
+                serial_number: output_name.serial.as_deref().unwrap_or("Unknown").to_owned(),
             },
         );
 
@@ -972,7 +974,7 @@ impl Tty {
             surface,
             None,
             allocator.clone(),
-            device.gbm.clone(),
+            GbmFramebufferExporter::new(device.gbm.clone(), crate::backend::drm_node_filter()),
             SUPPORTED_COLOR_FORMATS,
             // This is only used to pick a good internal format, so it can use the surface's render
             // formats, even though we only ever render on the primary GPU.
@@ -1002,7 +1004,7 @@ impl Tty {
                     surface,
                     None,
                     allocator,
-                    device.gbm.clone(),
+                    GbmFramebufferExporter::new(device.gbm.clone(), crate::backend::drm_node_filter()),
                     SUPPORTED_COLOR_FORMATS,
                     render_formats,
                     device.drm.cursor_size(),
@@ -1703,7 +1705,6 @@ impl Tty {
         self.ipc_outputs.clone()
     }
 
-    #[cfg(feature = "xdp-gnome-screencast")]
     pub fn primary_gbm_device(&self) -> Option<GbmDevice<DrmDeviceFd>> {
         // Try to find a device corresponding to the primary render node.
         let device = self
@@ -1714,6 +1715,18 @@ impl Tty {
         let device = device.or_else(|| self.devices.get(&self.primary_node));
 
         Some(device?.gbm.clone())
+    }
+
+    pub fn primary_drm_device_fd(&self) -> Option<DrmDeviceFd> {
+        // Try to find a device corresponding to the primary render node.
+        let device = self
+            .devices
+            .values()
+            .find(|d| d.render_node == self.primary_render_node);
+        // Otherwise, try to get the device corresponding to the primary node.
+        let device = device.or_else(|| self.devices.get(&self.primary_node));
+        // Clone the DrmDeviceFd from the DrmDevice
+        Some(device?.drm.device_fd().clone())
     }
 
     pub fn set_monitors_active(&mut self, active: bool) {

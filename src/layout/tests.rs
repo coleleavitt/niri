@@ -675,6 +675,7 @@ impl Op {
                         subpixel: Subpixel::Unknown,
                         make: String::new(),
                         model: String::new(),
+                        serial_number: String::new(),
                     },
                 );
                 output.change_current_state(
@@ -707,6 +708,7 @@ impl Op {
                         subpixel: Subpixel::Unknown,
                         make: String::new(),
                         model: String::new(),
+                        serial_number: String::new(),
                     },
                 );
                 output.change_current_state(
