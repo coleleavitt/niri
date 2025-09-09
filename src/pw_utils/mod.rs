@@ -4,6 +4,7 @@ use std::io::Cursor;
 use std::iter::zip;
 use std::mem;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::unix::io::RawFd;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -16,6 +17,7 @@ use pipewire::core::{Core, PW_ID_CORE};
 use pipewire::main_loop::MainLoop;
 use pipewire::properties::Properties;
 use pipewire::spa::buffer::{DataType, SyncTimelineRef};
+use pipewire::spa::drm::{create_drm_syncobj_timeline, drm_syncobj_handle_to_fd, find_drm_device_fd};
 use pipewire::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
 use pipewire::spa::param::format_utils::parse_format;
 use pipewire::spa::param::video::{VideoFormat, VideoInfoRaw};
@@ -84,6 +86,11 @@ pub struct Cast {
     dmabufs: Rc<RefCell<HashMap<i64, Dmabuf>>>,
     scheduled_redraw: Option<RegistrationToken>,
     sync_timeline: Option<SyncTimelineRef>,
+
+    // DRM syncobj timeline file descriptors for linux-drm-syncobj-v1
+    acquire_timeline_fd: Option<RawFd>,
+    release_timeline_fd: Option<RawFd>,
+    drm_device_fd: Option<RawFd>,
 
     // FIXME: Need proper implementation of buffer state
     buffers: Vec<BufferState>,
@@ -187,6 +194,7 @@ impl PipeWire {
     #[allow(clippy::too_many_arguments)]
     pub fn start_cast(
         &self,
+        scheduler: &calloop::futures::Scheduler<()>,
         gbm: GbmDevice<DrmDeviceFd>,
         formats: FormatSet,
         session_id: usize,
@@ -233,6 +241,7 @@ impl PipeWire {
             .state_changed({
                 let is_active = is_active.clone();
                 let stop_cast = stop_cast.clone();
+                let scheduler = scheduler.clone();
                 move |stream, (), old, new| {
                     debug!("pw stream: state changed: {old:?} -> {new:?}");
 
@@ -244,7 +253,11 @@ impl PipeWire {
                                 debug!("pw stream: sending signal with {id}");
 
                                 let _span = tracy_client::span!("sending PipeWireStreamAdded");
-                                async_io::block_on(async {
+                                let signal_ctx = signal_ctx.clone();
+                                let stop_cast = stop_cast.clone();
+                                
+                                // Spawn the async task using calloop's scheduler
+                                scheduler.schedule(async move {
                                     let res = mutter_screen_cast::Stream::pipe_wire_stream_added(
                                         &signal_ctx,
                                         id,
@@ -255,7 +268,7 @@ impl PipeWire {
                                         warn!("error sending PipeWireStreamAdded: {err:?}");
                                         stop_cast();
                                     }
-                                });
+                                }).unwrap();
                             }
 
                             is_active.set(false);
@@ -671,6 +684,9 @@ moving to ready"
             dmabufs,
             scheduled_redraw: None,
             sync_timeline: None,
+            acquire_timeline_fd: None,
+            release_timeline_fd: None,
+            drm_device_fd: None,
             buffers: Vec::new(),
             current_release_point: 0,
         };
@@ -699,6 +715,49 @@ impl BufferState {
 
 
 impl Cast {
+    /// Initialize DRM syncobj timeline objects for linux-drm-syncobj-v1
+    pub fn initialize_drm_timelines(&mut self) -> anyhow::Result<()> {
+        if self.acquire_timeline_fd.is_some() && self.release_timeline_fd.is_some() {
+            return Ok(()); // Already initialized
+        }
+
+        // Find or use cached DRM device
+        let drm_device_fd = match self.drm_device_fd {
+            Some(fd) => fd,
+            None => {
+                let device = find_drm_device_fd()?;
+                let fd = device.as_raw_fd();
+                self.drm_device_fd = Some(fd);
+                // Keep the device alive by storing it
+                // TODO: Store the DrmDeviceFd properly to avoid leaking
+                std::mem::forget(device);
+                fd
+            }
+        };
+
+        // Create acquire timeline
+        if self.acquire_timeline_fd.is_none() {
+            let acquire_handle = create_drm_syncobj_timeline(drm_device_fd)
+                .context("Failed to create acquire timeline syncobj")?;
+            let acquire_fd = drm_syncobj_handle_to_fd(drm_device_fd, acquire_handle)
+                .context("Failed to export acquire timeline to FD")?;
+            self.acquire_timeline_fd = Some(acquire_fd);
+        }
+
+        // Create release timeline  
+        if self.release_timeline_fd.is_none() {
+            let release_handle = create_drm_syncobj_timeline(drm_device_fd)
+                .context("Failed to create release timeline syncobj")?;
+            let release_fd = drm_syncobj_handle_to_fd(drm_device_fd, release_handle)
+                .context("Failed to export release timeline to FD")?;
+            self.release_timeline_fd = Some(release_fd);
+        }
+
+        debug!("DRM syncobj timelines initialized: acquire_fd={:?}, release_fd={:?}", 
+               self.acquire_timeline_fd, self.release_timeline_fd);
+
+        Ok(())
+    }
 
     pub fn ensure_size(&mut self, size: Size<i32, Physical>) -> anyhow::Result<CastSizeChange> {
         let new_size = Size::from((size.w as u32, size.h as u32));
@@ -908,43 +967,15 @@ impl Cast {
     }
 
 
-    /// Synchronizes DMA-BUF buffers with timeline for explicit synchronization using linux-drm-syncobj-v1
-    async fn sync_dmabuf_with_timeline(
-        sync_timeline: &mut Option<SyncTimelineRef>,
-        buffer: &mut [pipewire::spa::buffer::Data],
-    ) -> Result<(), anyhow::Error> {
-        if let Some(sync_timeline) = sync_timeline {
-            // Look for sync object file descriptors (acquire and release timelines)
-            let mut sync_fds = Vec::new();
-            for data in buffer {
-                if data.type_() == DataType::SyncObj {
-                    if let Some(fd) = data.sync_obj_fd() {
-                        sync_fds.push(fd);
-                    }
-                }
-            }
 
-            // If we have sync object timeline fds, use them for explicit sync
-            if sync_fds.len() >= 2 {
-                let acquire_timeline_fd = sync_fds[0];  // First syncobj is acquire timeline
-                let release_timeline_fd = sync_fds[1];  // Second syncobj is release timeline
-                
-                sync_timeline.sync_dma_buf(acquire_timeline_fd, release_timeline_fd).await
-                    .map_err(|err| anyhow::anyhow!("Failed to sync DMA-BUF with timeline: {:?}", err))?;
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn dequeue_buffer_and_render_async(
+    pub async fn dequeue_buffer_and_render(
         &mut self,
         renderer: &mut GlesRenderer,
         elements: &[impl RenderElement<GlesRenderer>],
         size: Size<i32, Physical>,
         scale: Scale<f64>,
-        wait_for_sync: bool,
     ) -> Result<bool, anyhow::Error> {
-        let _span = span!("Cast::dequeue_buffer_and_render_async");
+        let _span = span!("Cast::dequeue_buffer_and_render");
 
         // Check damage in a separate scope
         let has_damage = {
@@ -972,7 +1003,6 @@ impl Cast {
         // Get acquire point from timeline - this is our producer role
         let acquire_point = self.update_sync_timeline().await.unwrap_or(0);
 
-        // Use the new explicit sync dequeue method for timeline synchronization
         let Some(mut buffer) = self.stream.dequeue_buffer_with_sync().await? else {
             return Ok(false);
         };
@@ -990,20 +1020,14 @@ impl Cast {
             elements.iter().rev(),
         )?;
 
-        if wait_for_sync {
-            let _span = span!("wait for completion");
-            if let Err(err) = sync_point.wait() {
-                warn!("error waiting for GPU rendering: {:?}", err);
-            }
+        // Always wait for GPU completion for proper timeline synchronization
+        let _span = span!("wait for completion");
+        if let Err(err) = sync_point.wait() {
+            warn!("error waiting for GPU rendering: {:?}", err);
         }
 
         // Update buffer chunks with stride and offset information
         self.update_buffer_chunks(buffer.datas_mut(), &dmabuf);
-
-        // Only sync the DMA-BUF with timeline, but don't set release point
-        if wait_for_sync && self.sync_timeline.is_some() {
-            Self::sync_dmabuf_with_timeline(&mut self.sync_timeline, buffer.datas_mut()).await?;
-        }
 
         // Save buffer_id and acquire_point before dropping buffer
         let buffer_id = fd;
@@ -1011,7 +1035,18 @@ impl Cast {
         // Explicitly drop the buffer here to release the immutable borrow of self.stream
         drop(buffer);
 
-        // Now we can safely perform mutable operations on self
+        // Now we can safely call mutable methods on self
+        // Initialize DRM timelines if needed and perform sync
+        if let Err(err) = self.initialize_drm_timelines() {
+            warn!("Failed to initialize DRM timelines: {:?}", err);
+        } else if let (Some(acquire_fd), Some(release_fd)) = (self.acquire_timeline_fd, self.release_timeline_fd) {
+            if let Some(ref sync_timeline) = self.sync_timeline {
+                if let Err(err) = sync_timeline.sync_dma_buf(acquire_fd, release_fd).await {
+                    warn!("Failed to sync DMA-BUF with timeline: {:?}", err);
+                }
+            }
+        }
+
         self.buffers.push(BufferState::new(buffer_id, acquire_point));
 
         self.last_frame_time = get_monotonic_time();
@@ -1020,32 +1055,11 @@ impl Cast {
         Ok(true)
     }
 
-    pub fn dequeue_buffer_and_render(
-        &mut self,
-        renderer: &mut GlesRenderer,
-        elements: &[impl RenderElement<GlesRenderer>],
-        size: Size<i32, Physical>,
-        scale: Scale<f64>,
-        wait_for_sync: bool,
-    ) -> bool {
-        async_io::block_on(self.dequeue_buffer_and_render_async(
-            renderer,
-            elements,
-            size,
-            scale,
-            wait_for_sync,
-        ))
-        .unwrap_or_else(|err| {
-            warn!("error rendering to pw buffer: {err:?}");
-            false
-        })
-    }
 
-    pub fn dequeue_buffer_and_clear(
+    pub async fn dequeue_buffer_and_clear(
         &mut self,
         renderer: &mut GlesRenderer,
-        wait_for_sync: bool,
-    ) -> bool {
+    ) -> Result<bool, anyhow::Error> {
         {
             let mut state = self.state.borrow_mut();
             if let CastState::Ready { damage_tracker, .. } = &mut *state {
@@ -1053,13 +1067,11 @@ impl Cast {
             }
         }
 
-        // Get acquire point from timeline - this is our producer role
-        // Note: This method needs to be async to properly handle timeline updates
-        let acquire_point = async_io::block_on(self.update_sync_timeline()).unwrap_or(0);
+        // Get acquire point from timeline - now properly async
+        let acquire_point = self.update_sync_timeline().await.unwrap_or(0);
 
-        let Some(mut buffer) = self.stream.dequeue_buffer() else {
-            warn!("no available buffer in pw stream, skipping clear");
-            return false;
+        let Some(mut buffer) = self.stream.dequeue_buffer_with_sync().await? else {
+            return Ok(false);
         };
 
         let fd = buffer.datas_mut()[0].as_raw().fd;
@@ -1068,35 +1080,38 @@ impl Cast {
 
         match clear_dmabuf(renderer, dmabuf.clone()) {
             Ok(sync_point) => {
-                if wait_for_sync {
-                    let _span = tracy_client::span!("wait for completion");
-                    if let Err(err) = sync_point.wait() {
-                        warn!("error waiting for pw frame completion: {err:?}");
-                    }
+                // Always wait for GPU completion for proper timeline synchronization
+                let _span = tracy_client::span!("wait for completion");
+                if let Err(err) = sync_point.wait() {
+                    warn!("error waiting for pw frame completion: {err:?}");
                 }
             }
             Err(err) => {
                 warn!("error clearing dmabuf: {err:?}");
-                return false;
+                return Ok(false);
             }
         }
 
         // Update buffer chunks with stride and offset information
         self.update_buffer_chunks(buffer.datas_mut(), &dmabuf);
 
-        // Only sync the DMA-BUF with timeline, but don't set release point
-        if wait_for_sync && self.sync_timeline.is_some() {
-            if let Err(err) = async_io::block_on(Self::sync_dmabuf_with_timeline(&mut self.sync_timeline, buffer.datas_mut())) {
-                warn!("Sync operations failed: {:?}", err);
-                return false;
-            }
-        }
-
         // Save buffer_id before dropping buffer
         let buffer_id = fd_i64;
 
         // Explicitly drop the buffer here to release the immutable borrow of self.stream
         drop(buffer);
+
+        // Now we can safely call mutable methods on self
+        // Initialize DRM timelines if needed and perform sync
+        if let Err(err) = self.initialize_drm_timelines() {
+            warn!("Failed to initialize DRM timelines: {:?}", err);
+        } else if let (Some(acquire_fd), Some(release_fd)) = (self.acquire_timeline_fd, self.release_timeline_fd) {
+            if let Some(ref sync_timeline) = self.sync_timeline {
+                if let Err(err) = sync_timeline.sync_dma_buf(acquire_fd, release_fd).await {
+                    warn!("Failed to sync DMA-BUF with timeline: {:?}", err);
+                }
+            }
+        }
 
         // Now we can safely perform mutable operations on self
         self.buffers.push(BufferState::new(buffer_id, acquire_point));
@@ -1105,8 +1120,9 @@ impl Cast {
         self.last_frame_time = get_monotonic_time();
         self.cleanup_buffer_states();
 
-        true
+        Ok(true)
     }
+
 
 
     pub fn set_sync_timeline(&mut self, timeline: SyncTimelineRef) {

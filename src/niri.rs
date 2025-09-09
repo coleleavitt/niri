@@ -13,6 +13,7 @@ use std::{env, mem, thread};
 use _server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as KdeDecorationsMode;
 use anyhow::{bail, ensure, Context};
 use calloop::futures::Scheduler;
+use async_io;
 use niri_config::{
     Config, FloatOrInt, Key, Modifiers, OutputName, PreviewRender, TrackLayout,
     WarpMouseToFocusMode, WorkspaceReference, DEFAULT_BACKGROUND_COLOR,
@@ -1677,6 +1678,37 @@ impl State {
     }
 
     #[cfg(feature = "xdp-gnome-screencast")]
+    fn schedule_cast_clear_async(&mut self, stream_id: usize) {
+        let scheduler = self.niri.scheduler.clone();
+        
+        // We need to extract the renderer somehow for async use
+        // For now, we'll need a different approach since renderer can't be shared across threads
+        
+        let casts = &mut self.niri.casts;
+        let Some(cast) = casts.iter_mut().find(|cast| cast.stream_id == stream_id) else {
+            warn!("cast to clear is missing");
+            return;
+        };
+
+        // For now, we need to use the sync rendering path but with async PipeWire operations
+        self.backend.with_primary_renderer(|renderer| {
+            // Schedule the async clear operation - this is not ideal but necessary due to renderer constraints
+            let result = async_io::block_on(cast.dequeue_buffer_and_clear(renderer));
+            match result {
+                Ok(true) => {
+                    cast.last_frame_time = get_monotonic_time();
+                }
+                Ok(false) => {
+                    // No buffer available or other issue
+                }
+                Err(err) => {
+                    warn!("error clearing cast buffer: {err:?}");
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "xdp-gnome-screencast")]
     fn redraw_cast(&mut self, stream_id: usize) {
         let _span = tracy_client::span!("State::redraw_cast");
 
@@ -1688,15 +1720,8 @@ impl State {
 
         match &cast.target {
             CastTarget::Nothing => {
-                let config = self.niri.config.borrow();
-                let wait_for_sync = config.debug.wait_for_frame_completion_in_pipewire;
-                drop(config);
-
-                self.backend.with_primary_renderer(|renderer| {
-                    if cast.dequeue_buffer_and_clear(renderer, wait_for_sync) {
-                        cast.last_frame_time = get_monotonic_time();
-                    }
-                });
+                // Schedule the async render operation - explicit sync is now built-in
+                self.schedule_cast_clear_async(stream_id);
             }
             CastTarget::Output(weak) => {
                 if let Some(output) = weak.upgrade() {
@@ -1733,10 +1758,6 @@ impl State {
                     }
                 }
 
-                let config = self.niri.config.borrow();
-                let wait_for_sync = config.debug.wait_for_frame_completion_in_pipewire;
-                drop(config);
-
                 self.backend.with_primary_renderer(|renderer| {
                     // FIXME: pointer.
                     let elements = mapped
@@ -1744,15 +1765,23 @@ impl State {
                         .rev()
                         .collect::<Vec<_>>();
 
-                    // To this:
-                    if cast.dequeue_buffer_and_render(
+                    // Use async render with built-in explicit sync
+                    let result = async_io::block_on(cast.dequeue_buffer_and_render(
                         renderer,
                         &elements,
                         bbox.size,
                         scale,
-                        wait_for_sync,
-                    ) {
-                        cast.last_frame_time = get_monotonic_time();
+                    ));
+                    match result {
+                        Ok(true) => {
+                            cast.last_frame_time = get_monotonic_time();
+                        }
+                        Ok(false) => {
+                            // No buffer available or other issue
+                        }
+                        Err(err) => {
+                            warn!("error rendering to cast buffer: {err:?}");
+                        }
                     }
                 });
             }
@@ -1918,6 +1947,7 @@ impl State {
                 }
 
                 let res = pw.start_cast(
+                    &self.niri.scheduler,
                     gbm,
                     render_formats,
                     session_id,
@@ -4459,9 +4489,7 @@ impl Niri {
 
         let scale = Scale::from(output.current_scale().fractional_scale());
 
-        let config = self.config.borrow();
-        let wait_for_sync = config.debug.wait_for_frame_completion_in_pipewire;
-        drop(config);
+        // Explicit sync is now built-in, no debug flag needed
 
         let mut elements = None;
         let mut casts_to_stop = vec![];
@@ -4494,8 +4522,18 @@ impl Niri {
                 self.render(renderer, output, true, RenderTarget::Screencast)
             });
 
-            if cast.dequeue_buffer_and_render(renderer, elements, size, scale, wait_for_sync) {
-                cast.last_frame_time = target_presentation_time;
+            // Use async render with built-in explicit sync
+            let result = async_io::block_on(cast.dequeue_buffer_and_render(renderer, elements, size, scale));
+            match result {
+                Ok(true) => {
+                    cast.last_frame_time = target_presentation_time;
+                }
+                Ok(false) => {
+                    // No buffer available or other issue
+                }
+                Err(err) => {
+                    warn!("error rendering to cast buffer: {err:?}");
+                }
             }
         }
         self.casts = casts;
@@ -4515,10 +4553,6 @@ impl Niri {
         let _span = tracy_client::span!("Niri::render_windows_for_screen_cast");
 
         let scale = Scale::from(output.current_scale().fractional_scale());
-
-        let config = self.config.borrow();
-        let wait_for_sync = config.debug.wait_for_frame_completion_in_pipewire;
-        drop(config);
 
         let mut casts_to_stop = vec![];
 
@@ -4558,9 +4592,18 @@ impl Niri {
             // FIXME: pointer.
             let elements: Vec<_> = mapped.render_for_screen_cast(renderer, scale).collect();
 
-            if cast.dequeue_buffer_and_render(renderer, &elements, bbox.size, scale, wait_for_sync)
-            {
-                cast.last_frame_time = target_presentation_time;
+            // Use async render with built-in explicit sync
+            let result = async_io::block_on(cast.dequeue_buffer_and_render(renderer, &elements, bbox.size, scale));
+            match result {
+                Ok(true) => {
+                    cast.last_frame_time = target_presentation_time;
+                }
+                Ok(false) => {
+                    // No buffer available or other issue
+                }
+                Err(err) => {
+                    warn!("error rendering to cast buffer: {err:?}");
+                }
             }
         }
         self.casts = casts;
