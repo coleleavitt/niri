@@ -2,3 +2,9 @@
 /result
 /.idea
 /Cargo.lock
+debug/
+target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+rust-project.json
