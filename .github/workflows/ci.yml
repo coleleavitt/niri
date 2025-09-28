@@ -94,7 +94,6 @@ jobs:
           cargo build --features profile-with-tracy &
           wait
 
-  # ALPINE MUSL BUILD - Fixed with proper static libraries
   alpine:
     strategy:
       fail-fast: false
@@ -108,7 +107,7 @@ jobs:
       - name: Cache APT packages (including musl tools and static libraries)
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
-          packages: ${{ env.DEPS_APT }} musl-tools musl-dev gcc-multilib libpipewire-0.3-dev:amd64 libpango1.0-dev:amd64 libcairo2-dev:amd64 libglib2.0-dev:amd64 libharfbuzz-dev:amd64 libdisplay-info-dev:amd64 libgbm-dev:amd64 libseat-dev:amd64 libudev-dev:amd64 libinput-dev:amd64 libxkbcommon-dev:amd64
+          packages: ${{ env.DEPS_APT }} musl-tools musl-dev gcc-multilib pkg-config
           version: 1.0
           
       - uses: dtolnay/rust-toolchain@stable
@@ -126,18 +125,6 @@ jobs:
           echo "[registries.crates-io]" >> ~/.cargo/config.toml
           echo "protocol = \"sparse\"" >> ~/.cargo/config.toml
 
-      - name: Setup musl cross-compilation environment
-        run: |
-          # Install pkg-config wrapper for musl
-          sudo apt-get install -y pkgconf-pkg-config
-          
-          # Create musl pkg-config wrapper
-          sudo tee /usr/local/bin/musl-pkg-config > /dev/null << 'EOF'
-          #!/bin/bash
-          exec pkg-config "$@"
-          EOF
-          sudo chmod +x /usr/local/bin/musl-pkg-config
-
       - name: Build musl static binary
         run: |
           # Proper cross-compilation environment setup
@@ -146,10 +133,9 @@ jobs:
           export AR_x86_64_unknown_linux_musl=ar
           export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
           
-          # Configure pkg-config for cross-compilation
+          # Configure pkg-config for cross-compilation (simplified approach)
           export PKG_CONFIG_ALLOW_CROSS=1
           export PKG_CONFIG_ALL_STATIC=1
-          export PKG_CONFIG=/usr/local/bin/musl-pkg-config
           
           # Set library paths for musl
           export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig"
@@ -320,7 +306,6 @@ jobs:
         with:
           show-progress: false
 
-      # FIXED: Correct cache path for Fedora containers
       - name: Cache DNF packages
         uses: actions/cache@v4
         with:
@@ -365,7 +350,6 @@ jobs:
           shared-key: "freebsd"
           cache-all-crates: true
 
-      # FIXED: Remove FreeBSD cache (vmactions doesn't support it well)
       - run: sudo rm /var/lib/dpkg/info/man-db.*
 
       - name: Build
@@ -383,17 +367,18 @@ jobs:
 
   nix:
     runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
           show-progress: false
       
-      # Install Nix with proper setup
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v3
         continue-on-error: true
       
-      # Magic Nix Cache for major speed boost
       - name: Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@main
         continue-on-error: true
@@ -432,7 +417,6 @@ jobs:
           lfs: true
           show-progress: false
       
-      # Cache Python dependencies
       - name: Cache Python dependencies
         uses: actions/cache@v4
         with:
