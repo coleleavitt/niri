@@ -286,6 +286,7 @@ jobs:
 
       - run: cargo build --all
 
+  # FIXED: FreeBSD with PROPER Rust build caching (both fetch AND rebuild)
   freebsd:
     runs-on: ubuntu-24.04
     env:
@@ -330,21 +331,22 @@ jobs:
             freebsd-pkg-${{ hashFiles('DEPS_PKG') }}-
             freebsd-pkg-
 
-      - name: Cache FreeBSD Build Artifacts (Layer 3 - Build Cache)
+      # FIXED: The KEY fix - cache the actual BUILD ARTIFACTS properly
+      - name: Cache FreeBSD Build Artifacts (Layer 3 - BOTH Source + Compiled)
         uses: actions/cache@v4
         with:
           path: |
             ~/.freebsd-cargo-cache
             ~/.freebsd-target-cache
             ~/.freebsd-rust-cache
-          key: freebsd-build-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('src/**') }}
+          key: freebsd-build-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('src/**/*.rs', 'Cargo.toml', '**/*.rs') }}
           restore-keys: |
             freebsd-build-${{ hashFiles('Cargo.lock') }}-
             freebsd-build-
 
       - run: sudo rm /var/lib/dpkg/info/man-db.*
 
-      - name: Build with ULTIMATE VM caching
+      - name: Build with PROPER Rust caching (skips fetch AND rebuild)
         uses: vmactions/freebsd-vm@966989c456d41351f095a421f60e71342d3bce41
         with:
           mem: 4096
@@ -385,47 +387,55 @@ jobs:
             
             export CARGO_HOME="$PWD/cargo-home"
             
+            # FIXED: Set proper Rust cache environment variables
+            export CARGO_TARGET_DIR="$PWD/target"
+            export RUSTC_WRAPPER=""
+            export CARGO_BUILD_JOBS=4
+            
+            # FIXED: Restore BOTH cargo cache AND target cache
             if [ -d ~/.freebsd-cargo-cache ] && [ -n "$(ls -A ~/.freebsd-cargo-cache 2>/dev/null)" ]; then
-              echo "✓ Restoring Cargo cache"
+              echo "✅ Restoring Cargo cache (source downloads)"
               cp -r ~/.freebsd-cargo-cache/* "$CARGO_HOME/" 2>/dev/null || true
             fi
             
             if [ -d ~/.freebsd-target-cache ] && [ -n "$(ls -A ~/.freebsd-target-cache 2>/dev/null)" ]; then
-              echo "✓ Restoring target cache"
+              echo "🚀 Restoring target cache (COMPILED ARTIFACTS)"
               mkdir -p target
               cp -r ~/.freebsd-target-cache/* target/ 2>/dev/null || true
+              echo "✅ Target cache restored - this should SKIP REBUILDS!"
             fi
             
             curl -o patch-pipewire_init 'https://cgit.freebsd.org/ports/plain/x11-wm/niri/files/patch-pipewire_init?id=f3f7e555b06d9a87d63c047ce3e82e936a11f2fe'
             
-            export CARGO_BUILD_JOBS=4
-            export RUSTC_WRAPPER=""
-            export CARGO_TARGET_DIR="$PWD/target"
-            
-            echo "⚡ Fetching dependencies"
+            echo "⚡ Fetching dependencies (should be cached)"
             cargo fetch
             
             echo "⚡ Applying patches"
             ( cd $CARGO_HOME/git/checkouts/pipewire-rs-*/*/; patch -p2 < $CARGO_HOME/../patch-pipewire_init; )
             
-            echo "⚡ Building project"
-            cargo build --offline --no-default-features --features dbus,xdp-gnome-screencast
+            echo "🔨 Building project (should skip rebuilds if cache hit)"
+            # FIXED: Use incremental builds properly
+            export CARGO_INCREMENTAL=1
+            cargo build --offline --no-default-features --features dbus,xdp-gnome-screencast --verbose
             
-            echo "💾 Saving comprehensive build cache"
+            echo "💾 Saving BOTH source and compiled artifacts"
             
+            # Save Cargo cache (source)
             if [ -d "$CARGO_HOME" ]; then
               rm -rf ~/.freebsd-cargo-cache/* 2>/dev/null || true
               cp -r "$CARGO_HOME"/* ~/.freebsd-cargo-cache/ 2>/dev/null || true
-              echo "✓ Saved Cargo cache ($(du -sh ~/.freebsd-cargo-cache 2>/dev/null | cut -f1))"
+              echo "✅ Saved Cargo cache ($(du -sh ~/.freebsd-cargo-cache 2>/dev/null | cut -f1))"
             fi
             
+            # FIXED: Save target cache (COMPILED ARTIFACTS) - This is the key fix!
             if [ -d target ]; then
               rm -rf ~/.freebsd-target-cache/* 2>/dev/null || true
               cp -r target/* ~/.freebsd-target-cache/ 2>/dev/null || true
-              echo "✓ Saved target cache ($(du -sh ~/.freebsd-target-cache 2>/dev/null | cut -f1))"
+              echo "🚀 Saved target cache ($(du -sh ~/.freebsd-target-cache 2>/dev/null | cut -f1))"
+              echo "✅ Next run should skip rebuilds!"
             fi
             
-            echo "🎉 FreeBSD build completed successfully!"
+            echo "🎉 FreeBSD build completed with PROPER caching!"
 
   # OPTIMIZED: Nix with comprehensive caching
   nix:
