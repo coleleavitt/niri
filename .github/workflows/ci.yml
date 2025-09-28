@@ -98,6 +98,9 @@ jobs:
       - name: Install Deps
         run: apk add --no-cache ${{ env.DEPS_APK }}
 
+      # Fix: Add Rust toolchain for Alpine container
+      - uses: dtolnay/rust-toolchain@stable
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
@@ -230,7 +233,10 @@ jobs:
 
   fedora:
     runs-on: ubuntu-24.04
-    container: fedora:41
+    container: 
+      image: fedora:41
+      # Fix: Run as root to avoid sudo permission issues
+      options: --user root
 
     steps:
       - uses: actions/checkout@v4
@@ -239,10 +245,15 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo dnf update -y
-          sudo dnf install -y ${{ env.DEPS_DNF }} libadwaita-devel
+          # Fix: Remove sudo since we're running as root
+          dnf update -y
+          dnf install -y ${{ env.DEPS_DNF }} libadwaita-devel
+
+      # Fix: Add missing Rust toolchain
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
       - run: cargo build --all
 
   freebsd:
@@ -363,3 +374,4 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./publish
           force_orphan: true
+
