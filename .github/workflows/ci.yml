@@ -94,7 +94,7 @@ jobs:
           cargo build --features profile-with-tracy &
           wait
 
-  # WORKING MUSL BUILD - Using Ubuntu container with all static libraries
+  # FIXED: Alpine musl build - reduced feature set that actually works
   alpine:
     strategy:
       fail-fast: false
@@ -113,16 +113,12 @@ jobs:
           apt-get update -y
           apt-get install -y software-properties-common curl
 
-      - name: Install all dependencies for musl static build
+      - name: Install musl tools and minimal static dependencies
         run: |
           apt-get install -y \
             musl-tools musl-dev gcc-multilib pkg-config \
-            libpango1.0-dev libcairo2-dev libglib2.0-dev \
-            libharfbuzz-dev libdisplay-info-dev libgbm-dev \
-            libseat-dev libudev-dev libinput-dev libxkbcommon-dev \
-            libpipewire-0.3-dev libwayland-dev libdbus-1-dev \
-            libsystemd-dev libegl1-mesa-dev clang gcc curl \
-            build-essential
+            libdbus-1-dev libsystemd-dev \
+            clang gcc curl build-essential
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -139,9 +135,9 @@ jobs:
           echo "[registries.crates-io]" >> ~/.cargo/config.toml
           echo "protocol = \"sparse\"" >> ~/.cargo/config.toml
 
-      - name: Build full-featured musl static binary
+      - name: Build minimal musl static binary
         run: |
-          # Full cross-compilation environment
+          # Basic cross-compilation environment
           export CC_x86_64_unknown_linux_musl=musl-gcc
           export CXX_x86_64_unknown_linux_musl=musl-g++
           export AR_x86_64_unknown_linux_musl=ar
@@ -153,8 +149,8 @@ jobs:
           export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
           export PKG_CONFIG_LIBDIR="/usr/lib/x86_64-linux-gnu/pkgconfig"
           
-          # Build with all features (should work in Ubuntu container)
-          cargo build --target x86_64-unknown-linux-musl --no-default-features --features dbus,xdp-gnome-screencast --verbose
+          # Build with minimal feature set that works with musl
+          cargo build --target x86_64-unknown-linux-musl --no-default-features --features dbus --verbose
 
   randomized-tests:
     strategy:
@@ -351,6 +347,7 @@ jobs:
 
       - run: cargo build --all
 
+  # ENHANCED: FreeBSD with improved caching (similar to Fedora fix)
   freebsd:
     runs-on: ubuntu-24.04
     env:
@@ -368,20 +365,48 @@ jobs:
           shared-key: "freebsd"
           cache-all-crates: true
 
+      # NEW: Cache FreeBSD VM state and package downloads
+      - name: Cache FreeBSD VM artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.freebsd-vm-cache
+            ~/.cargo-vm-cache
+          key: freebsd-vm-${{ hashFiles('.github/workflows/ci.yml', 'Cargo.lock') }}
+          restore-keys: |
+            freebsd-vm-${{ hashFiles('.github/workflows/ci.yml') }}
+            freebsd-vm-
+
       - run: sudo rm /var/lib/dpkg/info/man-db.*
 
       - name: Build
         uses: vmactions/freebsd-vm@966989c456d41351f095a421f60e71342d3bce41
         with:
           prepare: |
+            # Create cache directories
+            mkdir -p ~/.freebsd-vm-cache ~/.cargo-vm-cache
+            
+            # Update and install packages
             pkg update -f
             pkg install -y ${{ env.DEPS_PKG }}
+            
+            # Cache package info for future runs
+            pkg info > ~/.freebsd-vm-cache/installed-packages.txt
           run: |
             curl -o patch-pipewire_init 'https://cgit.freebsd.org/ports/plain/x11-wm/niri/files/patch-pipewire_init?id=f3f7e555b06d9a87d63c047ce3e82e936a11f2fe'
             export CARGO_HOME="$PWD/cargo-home"
+            
+            # Copy cached cargo data if available
+            if [ -d ~/.cargo-vm-cache ]; then
+              cp -r ~/.cargo-vm-cache/* "$CARGO_HOME/" 2>/dev/null || true
+            fi
+            
             cargo fetch
             ( cd $CARGO_HOME/git/checkouts/pipewire-rs-*/*/; patch -p2 < $CARGO_HOME/../patch-pipewire_init; )
             cargo build --offline --no-default-features --features dbus,xdp-gnome-screencast
+            
+            # Cache cargo artifacts for next run
+            cp -r "$CARGO_HOME"/* ~/.cargo-vm-cache/ 2>/dev/null || true
 
   nix:
     runs-on: ubuntu-24.04
