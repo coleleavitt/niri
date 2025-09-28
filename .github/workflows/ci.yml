@@ -286,7 +286,7 @@ jobs:
 
       - run: cargo build --all
 
-  # SIMPLIFIED: FreeBSD using official vmactions approach with proper caching
+  # FIXED: FreeBSD using official vmactions approach with proper caching and FIXED patch path
   freebsd:
     runs-on: ubuntu-24.04
     steps:
@@ -331,7 +331,7 @@ jobs:
 
       - run: sudo rm /var/lib/dpkg/info/man-db.*
 
-      # SIMPLIFIED: Use official vmactions/freebsd-vm approach
+      # FIXED: Use official vmactions/freebsd-vm approach with PROPER patch path
       - name: Build in FreeBSD
         uses: vmactions/freebsd-vm@v1
         with:
@@ -372,16 +372,27 @@ jobs:
               cp -r ~/.freebsd-target-cache/* target/ 2>/dev/null || true
             fi
             
-            # Download pipewire patch
+            # Download pipewire patch to current working directory
+            echo "📥 Downloading FreeBSD pipewire patch"
             curl -o patch-pipewire_init 'https://cgit.freebsd.org/ports/plain/x11-wm/niri/files/patch-pipewire_init?id=f3f7e555b06d9a87d63c047ce3e82e936a11f2fe'
+            
+            # Store the absolute path of the patch file
+            PATCH_PATH="$PWD/patch-pipewire_init"
+            echo "📄 Patch file location: $PATCH_PATH"
             
             # Fetch dependencies
             echo "⚡ Fetching Rust dependencies"
             cargo fetch
             
-            # Apply patches  
+            # Apply patches with FIXED absolute path
             echo "⚡ Applying FreeBSD patches"
-            ( cd $CARGO_HOME/git/checkouts/pipewire-rs-*/*/; patch -p2 < $PWD/patch-pipewire_init; )
+            if [ -f "$PATCH_PATH" ]; then
+              ( cd "$CARGO_HOME/git/checkouts/pipewire-rs-"*/*/; patch -p2 < "$PATCH_PATH"; )
+              echo "✅ Patch applied successfully"
+            else
+              echo "❌ Patch file not found at $PATCH_PATH"
+              exit 1
+            fi
             
             # Build with incremental compilation
             echo "🔨 Building niri for FreeBSD"
@@ -389,8 +400,9 @@ jobs:
             cargo build --offline --no-default-features --features dbus,xdp-gnome-screencast --verbose
             
             # Save caches for next run
-            echo "💾 Saving caches"
+            echo "💾 Saving caches for next run"
             rm -rf ~/.freebsd-cargo-cache/* ~/.freebsd-target-cache/* 2>/dev/null || true
+            mkdir -p ~/.freebsd-cargo-cache ~/.freebsd-target-cache
             cp -r "$CARGO_HOME"/* ~/.freebsd-cargo-cache/ 2>/dev/null || true
             cp -r target/* ~/.freebsd-target-cache/ 2>/dev/null || true
             
