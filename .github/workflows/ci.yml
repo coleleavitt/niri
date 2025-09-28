@@ -10,7 +10,7 @@ on:
 env:
   DEPS_APT: curl gcc clang libudev-dev libgbm-dev libxkbcommon-dev libegl1-mesa-dev libwayland-dev libinput-dev libdbus-1-dev libsystemd-dev libseat-dev libpipewire-0.3-dev libpango1.0-dev libdisplay-info-dev
   DEPS_DNF: cargo gcc clang libudev-devel libgbm-devel libxkbcommon-devel wayland-devel libinput-devel dbus-devel systemd-devel libseat-devel pipewire-devel pango-devel cairo-gobject-devel libdisplay-info-devel
-  DEPS_APK: curl cargo clang-libclang eudev-dev glib-dev libdisplay-info-dev libinput-dev libseat-dev libxkbcommon-dev mesa-dev pango-dev pipewire-dev tar
+  DEPS_APK: curl cargo clang-libclang eudev-dev glib-dev libdisplay-info-dev libinput-dev libseat-dev libxkbcommon-dev mesa-dev pango-dev pipewire-dev tar llvm-static llvm-dev clang-static clang-dev
   DEPS_PKG: git curl rust llvm pkgconf pixman libudev-devd libdisplay-info seatd libinput libxkbcommon pipewire mesa-libs cairo devel/glib20 gettext-runtime harfbuzz pango
 
 jobs:
@@ -90,6 +90,12 @@ jobs:
     name: alpine musl
     runs-on: ubuntu-24.04
     container: alpine:3
+    
+    env:
+      # Force bindgen to use static linking for libclang on Alpine
+      LIBCLANG_PATH: /usr/lib/llvm20/lib/libclang.a
+      BINDGEN_EXTRA_CLANG_ARGS: --sysroot=/usr
+    
     steps:
       - uses: actions/checkout@v4
         with:
@@ -99,6 +105,7 @@ jobs:
         run: |
           # Install bash and curl first for dtolnay/rust-toolchain compatibility
           apk add --no-cache bash curl
+          # Install static clang libraries for bindgen
           apk add --no-cache ${{ env.DEPS_APK }}
 
       # Now bash and curl are available for the rust-toolchain action
