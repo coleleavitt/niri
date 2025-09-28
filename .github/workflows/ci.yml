@@ -92,8 +92,8 @@ jobs:
     container: alpine:3
     
     env:
-      # Force bindgen to use static linking for libclang on Alpine
-      LIBCLANG_PATH: /usr/lib/llvm20/lib/libclang.a
+      # Set LIBCLANG_PATH to the actual location in Alpine
+      LIBCLANG_PATH: /usr/lib/llvm20/lib
       BINDGEN_EXTRA_CLANG_ARGS: --sysroot=/usr
     
     steps:
@@ -105,8 +105,16 @@ jobs:
         run: |
           # Install bash and curl first for dtolnay/rust-toolchain compatibility
           apk add --no-cache bash curl
-          # Install static clang libraries for bindgen
+          # Install all dependencies including static clang libraries
           apk add --no-cache ${{ env.DEPS_APK }}
+          
+          # Create symlinks for bindgen to find libclang
+          if [ -f /usr/lib/llvm20/lib/libclang.so.20.1.8 ]; then
+            ln -sf /usr/lib/llvm20/lib/libclang.so.20.1.8 /usr/lib/llvm20/lib/libclang.so
+          fi
+          
+          # Debug: List what clang libraries are available
+          find /usr -name "*libclang*" -type f 2>/dev/null || true
 
       # Now bash and curl are available for the rust-toolchain action
       - uses: dtolnay/rust-toolchain@stable
