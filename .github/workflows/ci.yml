@@ -108,6 +108,10 @@ jobs:
         with:
           show-progress: false
 
+      # FIXED: Create cache directory before cache action (like Fedora fix)
+      - name: Prep Alpine cache dir
+        run: mkdir -p /var/cache/apk
+
       - name: Cache Alpine packages
         uses: actions/cache@v4
         with:
@@ -395,6 +399,7 @@ jobs:
         with:
           show-progress: false
 
+      # FIXED: Create cache directory before cache action
       - name: Prep dnf cache dir
         run: mkdir -p /var/cache/dnf
 
@@ -425,6 +430,7 @@ jobs:
 
       - run: cargo build --all
 
+  # FIXED: FreeBSD with proper cache directory setup (like Fedora)
   freebsd:
     runs-on: ubuntu-24.04
     env:
@@ -442,7 +448,17 @@ jobs:
           shared-key: "freebsd"
           cache-all-crates: true
 
-      # Multi-layer VM caching strategy
+      # FIXED: Create FreeBSD cache directories OUTSIDE VM (like Fedora fix)
+      - name: Prep FreeBSD cache directories
+        run: |
+          mkdir -p ~/.freebsd-base-system
+          mkdir -p ~/.freebsd-pkg-cache
+          mkdir -p ~/.freebsd-ports-cache
+          mkdir -p ~/.freebsd-cargo-cache
+          mkdir -p ~/.freebsd-target-cache
+          mkdir -p ~/.freebsd-rust-cache
+
+      # Multi-layer VM caching strategy (now directories exist!)
       - name: Cache FreeBSD VM Environment (Layer 1 - Base System)
         uses: actions/cache@v4
         with:
@@ -482,11 +498,10 @@ jobs:
           cpu: 4
           prepare: |
             echo "=== Setting up FreeBSD base system ==="
-            mkdir -p ~/.freebsd-base-system ~/.freebsd-pkg-cache ~/.freebsd-ports-cache
             
-            if [ -d ~/.freebsd-base-system ] && [ -f ~/.freebsd-base-system/.initialized ]; then
+            # FIXED: Directories now exist outside VM
+            if [ -f ~/.freebsd-base-system/.initialized ]; then
               echo "✓ Using cached base system"
-              export PKG_CACHEDIR=~/.freebsd-pkg-cache
             else
               echo "⚡ Initializing base system"
               sysctl kern.maxfiles=65536 2>/dev/null || true
@@ -496,7 +511,6 @@ jobs:
             
             echo "=== Managing FreeBSD packages ==="
             export PKG_CACHEDIR=~/.freebsd-pkg-cache
-            mkdir -p "$PKG_CACHEDIR"
             
             if [ -f ~/.freebsd-pkg-cache/.deps_installed ]; then
               echo "✓ Using cached packages"
@@ -517,9 +531,9 @@ jobs:
           run: |
             echo "=== FreeBSD Build Process ==="
             
-            mkdir -p ~/.freebsd-cargo-cache ~/.freebsd-target-cache ~/.freebsd-rust-cache
             export CARGO_HOME="$PWD/cargo-home"
             
+            # FIXED: Restore from pre-existing directories
             if [ -d ~/.freebsd-cargo-cache ] && [ -n "$(ls -A ~/.freebsd-cargo-cache 2>/dev/null)" ]; then
               echo "✓ Restoring Cargo cache"
               cp -r ~/.freebsd-cargo-cache/* "$CARGO_HOME/" 2>/dev/null || true
@@ -548,14 +562,15 @@ jobs:
             
             echo "💾 Saving comprehensive build cache"
             
+            # FIXED: Save to pre-existing directories
             if [ -d "$CARGO_HOME" ]; then
-              rm -rf ~/.freebsd-cargo-cache/*
+              rm -rf ~/.freebsd-cargo-cache/* 2>/dev/null || true
               cp -r "$CARGO_HOME"/* ~/.freebsd-cargo-cache/ 2>/dev/null || true
               echo "✓ Saved Cargo cache ($(du -sh ~/.freebsd-cargo-cache 2>/dev/null | cut -f1))"
             fi
             
             if [ -d target ]; then
-              rm -rf ~/.freebsd-target-cache/*
+              rm -rf ~/.freebsd-target-cache/* 2>/dev/null || true
               cp -r target/* ~/.freebsd-target-cache/ 2>/dev/null || true
               echo "✓ Saved target cache ($(du -sh ~/.freebsd-target-cache 2>/dev/null | cut -f1))"
             fi
