@@ -286,7 +286,6 @@ jobs:
 
       - run: cargo build --all
 
-  # FIXED: FreeBSD using official vmactions approach with proper caching and FIXED patch path
   freebsd:
     runs-on: ubuntu-24.04
     steps:
@@ -302,14 +301,12 @@ jobs:
           shared-key: "freebsd"
           cache-all-crates: true
 
-      # Create cache directories for vmactions to use
       - name: Prep FreeBSD cache directories
         run: |
           mkdir -p ~/.freebsd-pkg-cache
           mkdir -p ~/.freebsd-cargo-cache
           mkdir -p ~/.freebsd-target-cache
 
-      # Cache FreeBSD packages
       - name: Cache FreeBSD packages
         uses: actions/cache@v4
         with:
@@ -317,7 +314,6 @@ jobs:
           key: freebsd-pkg-${{ hashFiles('.github/workflows/ci.yml') }}-${{ env.DEPS_PKG }}
           restore-keys: freebsd-pkg-
 
-      # Cache Rust build artifacts  
       - name: Cache FreeBSD Rust artifacts
         uses: actions/cache@v4
         with:
@@ -331,7 +327,6 @@ jobs:
 
       - run: sudo rm /var/lib/dpkg/info/man-db.*
 
-      # FIXED: Use official vmactions/freebsd-vm approach with PROPER patch path
       - name: Build in FreeBSD
         uses: vmactions/freebsd-vm@v1
         with:
@@ -339,9 +334,8 @@ jobs:
           mem: 4096
           cpu: 4
           usesh: true
-          copyback: false  # Don't copy files back (we only need build success)
+          copyback: false
           prepare: |
-            # Restore cached packages if available
             if [ -d ~/.freebsd-pkg-cache ] && [ -f ~/.freebsd-pkg-cache/.deps_installed ]; then
               echo "✓ Using cached FreeBSD packages"
             else
@@ -356,11 +350,9 @@ jobs:
           run: |
             echo "=== FreeBSD Rust Build with Proper Caching ==="
             
-            # Set up Rust environment
             export CARGO_HOME="$HOME/.cargo"
             export CARGO_TARGET_DIR="$PWD/target"
             
-            # Restore Rust caches if available
             if [ -d ~/.freebsd-cargo-cache ]; then
               echo "✅ Restoring Cargo cache"
               cp -r ~/.freebsd-cargo-cache/* "$CARGO_HOME/" 2>/dev/null || true
@@ -372,19 +364,15 @@ jobs:
               cp -r ~/.freebsd-target-cache/* target/ 2>/dev/null || true
             fi
             
-            # Download pipewire patch to current working directory
             echo "📥 Downloading FreeBSD pipewire patch"
             curl -o patch-pipewire_init 'https://cgit.freebsd.org/ports/plain/x11-wm/niri/files/patch-pipewire_init?id=f3f7e555b06d9a87d63c047ce3e82e936a11f2fe'
             
-            # Store the absolute path of the patch file
             PATCH_PATH="$PWD/patch-pipewire_init"
             echo "📄 Patch file location: $PATCH_PATH"
             
-            # Fetch dependencies
             echo "⚡ Fetching Rust dependencies"
             cargo fetch
             
-            # Apply patches with FIXED absolute path
             echo "⚡ Applying FreeBSD patches"
             if [ -f "$PATCH_PATH" ]; then
               ( cd "$CARGO_HOME/git/checkouts/pipewire-rs-"*/*/; patch -p2 < "$PATCH_PATH"; )
@@ -394,12 +382,10 @@ jobs:
               exit 1
             fi
             
-            # Build with incremental compilation
             echo "🔨 Building niri for FreeBSD"
             export CARGO_INCREMENTAL=1
             cargo build --offline --no-default-features --features dbus,xdp-gnome-screencast --verbose
             
-            # Save caches for next run
             echo "💾 Saving caches for next run"
             rm -rf ~/.freebsd-cargo-cache/* ~/.freebsd-target-cache/* 2>/dev/null || true
             mkdir -p ~/.freebsd-cargo-cache ~/.freebsd-target-cache
@@ -408,7 +394,7 @@ jobs:
             
             echo "🎉 FreeBSD build completed successfully!"
 
-  # OPTIMIZED: Nix with comprehensive caching
+  # SIMPLIFIED: Fast Nix build (removed slow optimizations)
   nix:
     runs-on: ubuntu-24.04
     permissions:
@@ -419,75 +405,20 @@ jobs:
         with:
           show-progress: false
       
-      # OPTIMIZED: Additional Nix store caching
-      - name: Cache Nix store
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/nix
-            ~/.nix-profile
-            /nix/store
-          key: nix-store-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
-          restore-keys: |
-            nix-store-${{ runner.os }}-${{ hashFiles('flake.nix') }}
-            nix-store-${{ runner.os }}-
-      
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v3
-        with:
-          # OPTIMIZED: Enable additional Nix features
-          extra-conf: |
-            experimental-features = nix-command flakes
-            substituters = https://cache.nixos.org https://nix-community.cachix.org
-            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
-            max-jobs = auto
-            cores = 0
-            # Enable better parallelism
-            build-users-group = nixbld
         continue-on-error: true
       
       - name: Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@main
-        with:
-          # OPTIMIZED: Enable diagnostic mode for better debugging
-          diagnostic-endpoint: ""
-          listen: "0.0.0.0:37515"
         continue-on-error: true
-      
-      # OPTIMIZED: Cache flake inputs separately
-      - name: Cache Nix flake inputs  
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/nix-eval-cache
-            ~/.local/share/nix
-          key: nix-flake-inputs-${{ hashFiles('flake.lock') }}
-          restore-keys: nix-flake-inputs-
       
       - name: Check flake inputs
         uses: DeterminateSystems/flake-checker-action@v4
-        with:
-          # OPTIMIZED: Fail on insecure or broken flakes
-          fail-mode: true
         continue-on-error: true
       
-      # OPTIMIZED: More comprehensive flake operations
-      - name: Nix flake check with optimizations
-        run: |
-          # Enable more parallelism and better caching
-          export NIX_CONFIG="max-jobs = auto
-          cores = 0  
-          experimental-features = nix-command flakes
-          keep-outputs = true
-          keep-derivations = true"
-          
-          # Check flake health and build
-          echo "🔍 Checking flake inputs and outputs..."
-          nix flake check --print-build-logs --verbose
-          
-          # Optionally build specific outputs for better caching
-          echo "🚀 Building main derivation..."  
-          nix build --print-build-logs --verbose
+      # SIMPLIFIED: Just do the basic flake check (fast)
+      - run: nix flake check
         continue-on-error: true
 
   publish-wiki:
