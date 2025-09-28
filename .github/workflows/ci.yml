@@ -303,7 +303,6 @@ jobs:
           shared-key: "freebsd"
           cache-all-crates: true
 
-      # FIXED: Create FreeBSD cache directories OUTSIDE VM (like Fedora fix)
       - name: Prep FreeBSD cache directories
         run: |
           mkdir -p ~/.freebsd-base-system
@@ -428,6 +427,7 @@ jobs:
             
             echo "🎉 FreeBSD build completed successfully!"
 
+  # OPTIMIZED: Nix with comprehensive caching
   nix:
     runs-on: ubuntu-24.04
     permissions:
@@ -438,19 +438,75 @@ jobs:
         with:
           show-progress: false
       
+      # OPTIMIZED: Additional Nix store caching
+      - name: Cache Nix store
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/nix
+            ~/.nix-profile
+            /nix/store
+          key: nix-store-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-keys: |
+            nix-store-${{ runner.os }}-${{ hashFiles('flake.nix') }}
+            nix-store-${{ runner.os }}-
+      
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v3
+        with:
+          # OPTIMIZED: Enable additional Nix features
+          extra-conf: |
+            experimental-features = nix-command flakes
+            substituters = https://cache.nixos.org https://nix-community.cachix.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
+            max-jobs = auto
+            cores = 0
+            # Enable better parallelism
+            build-users-group = nixbld
         continue-on-error: true
       
       - name: Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@main
+        with:
+          # OPTIMIZED: Enable diagnostic mode for better debugging
+          diagnostic-endpoint: ""
+          listen: "0.0.0.0:37515"
         continue-on-error: true
+      
+      # OPTIMIZED: Cache flake inputs separately
+      - name: Cache Nix flake inputs  
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/nix-eval-cache
+            ~/.local/share/nix
+          key: nix-flake-inputs-${{ hashFiles('flake.lock') }}
+          restore-keys: nix-flake-inputs-
       
       - name: Check flake inputs
         uses: DeterminateSystems/flake-checker-action@v4
+        with:
+          # OPTIMIZED: Fail on insecure or broken flakes
+          fail-mode: true
         continue-on-error: true
       
-      - run: nix flake check
+      # OPTIMIZED: More comprehensive flake operations
+      - name: Nix flake check with optimizations
+        run: |
+          # Enable more parallelism and better caching
+          export NIX_CONFIG="max-jobs = auto
+          cores = 0  
+          experimental-features = nix-command flakes
+          keep-outputs = true
+          keep-derivations = true"
+          
+          # Check flake health and build
+          echo "🔍 Checking flake inputs and outputs..."
+          nix flake check --print-build-logs --verbose
+          
+          # Optionally build specific outputs for better caching
+          echo "🚀 Building main derivation..."  
+          nix build --print-build-logs --verbose
         continue-on-error: true
 
   publish-wiki:
@@ -510,7 +566,7 @@ jobs:
       - run: cp -r ./docs/site/* ./publish/
       
       - name: Deploy documentation
-        if: github.ref == 'refs/heads main'
+        if: github.ref == 'refs/heads/main'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
