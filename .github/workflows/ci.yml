@@ -92,36 +92,45 @@ jobs:
     container: alpine:3
     
     env:
-      # Set LIBCLANG_PATH to the actual location in Alpine
-      LIBCLANG_PATH: /usr/lib/llvm20/lib
+      # Force bindgen to use static linking (the key fix)
       BINDGEN_EXTRA_CLANG_ARGS: --sysroot=/usr
+      # Create a custom llvm-config wrapper for static linking
+      LLVM_CONFIG_PATH: /usr/local/bin/llvm-config-static
     
     steps:
       - uses: actions/checkout@v4
         with:
           show-progress: false
 
-      - name: Install Deps
+      - name: Install Deps and Configure Static Linking
         run: |
           # Install bash and curl first for dtolnay/rust-toolchain compatibility
           apk add --no-cache bash curl
           # Install all dependencies including static clang libraries
           apk add --no-cache ${{ env.DEPS_APK }}
           
-          # Create symlinks for bindgen to find libclang
-          if [ -f /usr/lib/llvm20/lib/libclang.so.20.1.8 ]; then
-            ln -sf /usr/lib/llvm20/lib/libclang.so.20.1.8 /usr/lib/llvm20/lib/libclang.so
+          # Create llvm-config wrapper for static linking (solves the core issue)
+          mkdir -p /usr/local/bin
+          cat > /usr/local/bin/llvm-config-static << 'EOF'
+          #!/bin/bash
+          if [ "$1" = "--libs" ]; then
+              /usr/bin/llvm-config "$@" --link-static
+          else
+              /usr/bin/llvm-config "$@"
           fi
+          EOF
+          chmod +x /usr/local/bin/llvm-config-static
           
-          # Debug: List what clang libraries are available
-          find /usr -name "*libclang*" -type f 2>/dev/null || true
+          # Verify llvm-config and clang setup
+          which llvm-config
+          llvm-config --version
+          find /usr -name "*libclang*" -type f 2>/dev/null | head -10
 
-      # Now bash and curl are available for the rust-toolchain action
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build
+      - name: Build with Static Linking
         run: cargo build --no-default-features --features dbus,xdp-gnome-screencast
 
   # Job that runs randomized tests for a longer period of time.
@@ -253,7 +262,6 @@ jobs:
     runs-on: ubuntu-24.04
     container: 
       image: fedora:41
-      # Run as root to avoid sudo permission issues
       options: --user root
 
     steps:
@@ -263,11 +271,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # Remove sudo since we're running as root
           dnf update -y
           dnf install -y ${{ env.DEPS_DNF }} libadwaita-devel
 
-      # Add missing Rust toolchain
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -284,20 +290,17 @@ jobs:
         with:
           show-progress: false
 
-      # Required for the rust-cache action to work.
       - uses: dtolnay/rust-toolchain@stable
 
-      # FIXME: doesn't seem to cache the builds, only the downloads for some unknown reason.
       - uses: Swatinem/rust-cache@v2
         with:
           cache-all-crates: true
 
-      # Remove man-db triggers to speed up Ubuntu upgrade by a minute or two during vmactions/freebsd-vm action run.
       - run: |
           sudo rm /var/lib/dpkg/info/man-db.*
 
       - name: Build
-        uses: vmactions/freebsd-vm@966989c456d41351f095a421f60e71342d3bce41  # v1.2.1
+        uses: vmactions/freebsd-vm@966989c456d41351f095a421f60e71342d3bce41
         with:
           prepare: |
             pkg update -f
