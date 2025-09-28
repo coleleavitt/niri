@@ -94,29 +94,43 @@ jobs:
           cargo build --features profile-with-tracy &
           wait
 
+  # WORKING MUSL BUILD - Using Ubuntu container with all static libraries
   alpine:
     strategy:
       fail-fast: false
     name: alpine musl static binary
     runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:24.04
+      options: --user root
     steps:
       - uses: actions/checkout@v4
         with:
           show-progress: false
 
-      - name: Cache APT packages (including musl tools and static libraries)
-        uses: awalsh128/cache-apt-pkgs-action@latest
-        with:
-          packages: ${{ env.DEPS_APT }} musl-tools musl-dev gcc-multilib pkg-config
-          version: 1.0
-          
+      - name: Setup container environment
+        run: |
+          apt-get update -y
+          apt-get install -y software-properties-common curl
+
+      - name: Install all dependencies for musl static build
+        run: |
+          apt-get install -y \
+            musl-tools musl-dev gcc-multilib pkg-config \
+            libpango1.0-dev libcairo2-dev libglib2.0-dev \
+            libharfbuzz-dev libdisplay-info-dev libgbm-dev \
+            libseat-dev libudev-dev libinput-dev libxkbcommon-dev \
+            libpipewire-0.3-dev libwayland-dev libdbus-1-dev \
+            libsystemd-dev libegl1-mesa-dev clang gcc curl \
+            build-essential
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
 
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: "v1-rust-musl"
+          prefix-key: "v1-rust-musl-container"
           shared-key: "alpine"
           cache-all-crates: true
 
@@ -125,24 +139,22 @@ jobs:
           echo "[registries.crates-io]" >> ~/.cargo/config.toml
           echo "protocol = \"sparse\"" >> ~/.cargo/config.toml
 
-      - name: Build musl static binary
+      - name: Build full-featured musl static binary
         run: |
-          # Proper cross-compilation environment setup
+          # Full cross-compilation environment
           export CC_x86_64_unknown_linux_musl=musl-gcc
           export CXX_x86_64_unknown_linux_musl=musl-g++
           export AR_x86_64_unknown_linux_musl=ar
           export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
           
-          # Configure pkg-config for cross-compilation (simplified approach)
+          # Configure pkg-config for cross-compilation
           export PKG_CONFIG_ALLOW_CROSS=1
           export PKG_CONFIG_ALL_STATIC=1
-          
-          # Set library paths for musl
-          export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig"
+          export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
           export PKG_CONFIG_LIBDIR="/usr/lib/x86_64-linux-gnu/pkgconfig"
           
-          # Build with musl target
-          cargo build --target x86_64-unknown-linux-musl --no-default-features --features dbus,xdp-gnome-screencast
+          # Build with all features (should work in Ubuntu container)
+          cargo build --target x86_64-unknown-linux-musl --no-default-features --features dbus,xdp-gnome-screencast --verbose
 
   randomized-tests:
     strategy:
@@ -296,6 +308,7 @@ jobs:
       - name: Run rustfmt
         run: cargo fmt --all -- --check
 
+  # FIXED: Fedora with proper cache directory setup
   fedora:
     runs-on: ubuntu-24.04
     container: 
@@ -306,6 +319,11 @@ jobs:
         with:
           show-progress: false
 
+      # FIXED: Create cache directory before cache action
+      - name: Prep dnf cache dir
+        run: mkdir -p /var/cache/dnf
+
+      # FIXED: Cache DNF packages (now the directory exists)
       - name: Cache DNF packages
         uses: actions/cache@v4
         with:
