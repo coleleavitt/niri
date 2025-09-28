@@ -94,40 +94,79 @@ jobs:
           cargo build --features profile-with-tracy &
           wait
 
-  # FIXED: Alpine musl build - reduced feature set that actually works
-  alpine:
+  # APPROACH 1: Native Alpine Linux with musl (BEST for complex dependencies)
+  alpine-native:
     strategy:
       fail-fast: false
-    name: alpine musl static binary
+    name: alpine musl (native)
     runs-on: ubuntu-24.04
     container:
-      image: ubuntu:24.04
+      image: alpine:3.19
       options: --user root
     steps:
       - uses: actions/checkout@v4
         with:
           show-progress: false
 
-      - name: Setup container environment
-        run: |
-          apt-get update -y
-          apt-get install -y software-properties-common curl
-
-      - name: Install musl tools and minimal static dependencies
-        run: |
-          apt-get install -y \
-            musl-tools musl-dev gcc-multilib pkg-config \
-            libdbus-1-dev libsystemd-dev \
-            clang gcc curl build-essential
-
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Alpine packages
+        uses: actions/cache@v4
         with:
-          targets: x86_64-unknown-linux-musl
+          path: /var/cache/apk
+          key: alpine-apk-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: alpine-apk-
+
+      - name: Install Alpine dependencies
+        run: |
+          apk update
+          apk add --no-cache \
+            curl gcc musl-dev pkgconfig git \
+            dbus-dev eudev-dev
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          source ~/.cargo/env
+          echo 'source ~/.cargo/env' >> ~/.profile
 
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: "v1-rust-musl-container"
-          shared-key: "alpine"
+          prefix-key: "v1-rust-alpine"
+          shared-key: "alpine-native"
+          cache-all-crates: true
+
+      - name: Configure Cargo
+        run: |
+          source ~/.cargo/env
+          echo "[registries.crates-io]" >> ~/.cargo/config.toml
+          echo "protocol = \"sparse\"" >> ~/.cargo/config.toml
+
+      - name: Build minimal musl binary (native musl)
+        run: |
+          source ~/.cargo/env
+          # Native musl build (no cross-compilation needed!)
+          cargo build --no-default-features --features dbus --verbose
+
+  # APPROACH 2: Cross-rs (BEST for professional CI)
+  alpine-cross:
+    strategy:
+      fail-fast: false
+    name: alpine musl (cross-rs)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross-rs
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust-cross"
+          shared-key: "alpine-cross"
           cache-all-crates: true
 
       - name: Configure Cargo
@@ -135,22 +174,64 @@ jobs:
           echo "[registries.crates-io]" >> ~/.cargo/config.toml
           echo "protocol = \"sparse\"" >> ~/.cargo/config.toml
 
-      - name: Build minimal musl static binary
+      - name: Create Cross.toml for musl
         run: |
-          # Basic cross-compilation environment
+          cat > Cross.toml << 'EOF'
+          [target.x86_64-unknown-linux-musl]
+          image = "ghcr.io/cross-rs/x86_64-unknown-linux-musl:edge"
+          
+          [build.env]
+          passthrough = [
+              "CARGO_INCREMENTAL",
+              "CARGO_NET_RETRY",
+              "RUSTUP_MAX_RETRIES",
+          ]
+          EOF
+
+      - name: Build with cross-rs (handles all complexity)
+        run: |
+          # Cross-rs handles musl + dependencies automatically
+          cross build --target x86_64-unknown-linux-musl --no-default-features --features dbus --verbose
+
+  # APPROACH 3: Ubuntu with static linking bypass (FALLBACK)
+  alpine-minimal:
+    strategy:
+      fail-fast: false  
+    name: alpine musl (minimal features)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          show-progress: false
+
+      - name: Cache APT packages
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: musl-tools musl-dev gcc curl pkg-config
+          version: 1.0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust-musl-minimal"
+          shared-key: "alpine-minimal"
+          cache-all-crates: true
+
+      - name: Configure Cargo
+        run: |
+          echo "[registries.crates-io]" >> ~/.cargo/config.toml
+          echo "protocol = \"sparse\"" >> ~/.cargo/config.toml
+
+      - name: Build ultra-minimal musl binary
+        run: |
           export CC_x86_64_unknown_linux_musl=musl-gcc
-          export CXX_x86_64_unknown_linux_musl=musl-g++
-          export AR_x86_64_unknown_linux_musl=ar
           export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
           
-          # Configure pkg-config for cross-compilation
-          export PKG_CONFIG_ALLOW_CROSS=1
-          export PKG_CONFIG_ALL_STATIC=1
-          export PKG_CONFIG_PATH="/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
-          export PKG_CONFIG_LIBDIR="/usr/lib/x86_64-linux-gnu/pkgconfig"
-          
-          # Build with minimal feature set that works with musl
-          cargo build --target x86_64-unknown-linux-musl --no-default-features --features dbus --verbose
+          # Ultra-minimal: just the core compositor without GUI libraries
+          cargo build --target x86_64-unknown-linux-musl --no-default-features --bin niri --verbose
 
   randomized-tests:
     strategy:
@@ -304,7 +385,6 @@ jobs:
       - name: Run rustfmt
         run: cargo fmt --all -- --check
 
-  # FIXED: Fedora with proper cache directory setup
   fedora:
     runs-on: ubuntu-24.04
     container: 
@@ -315,11 +395,9 @@ jobs:
         with:
           show-progress: false
 
-      # FIXED: Create cache directory before cache action
       - name: Prep dnf cache dir
         run: mkdir -p /var/cache/dnf
 
-      # FIXED: Cache DNF packages (now the directory exists)
       - name: Cache DNF packages
         uses: actions/cache@v4
         with:
@@ -347,7 +425,6 @@ jobs:
 
       - run: cargo build --all
 
-  # ENHANCED: FreeBSD with improved caching (similar to Fedora fix)
   freebsd:
     runs-on: ubuntu-24.04
     env:
@@ -365,48 +442,125 @@ jobs:
           shared-key: "freebsd"
           cache-all-crates: true
 
-      # NEW: Cache FreeBSD VM state and package downloads
-      - name: Cache FreeBSD VM artifacts
+      # Multi-layer VM caching strategy
+      - name: Cache FreeBSD VM Environment (Layer 1 - Base System)
+        uses: actions/cache@v4
+        with:
+          path: ~/.freebsd-base-system
+          key: freebsd-base-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: freebsd-base-${{ runner.os }}-
+
+      - name: Cache FreeBSD Packages (Layer 2 - Packages)
         uses: actions/cache@v4
         with:
           path: |
-            ~/.freebsd-vm-cache
-            ~/.cargo-vm-cache
-          key: freebsd-vm-${{ hashFiles('.github/workflows/ci.yml', 'Cargo.lock') }}
+            ~/.freebsd-pkg-cache
+            ~/.freebsd-ports-cache
+          key: freebsd-pkg-${{ hashFiles('DEPS_PKG') }}-${{ hashFiles('.github/workflows/ci.yml') }}
           restore-keys: |
-            freebsd-vm-${{ hashFiles('.github/workflows/ci.yml') }}
-            freebsd-vm-
+            freebsd-pkg-${{ hashFiles('DEPS_PKG') }}-
+            freebsd-pkg-
+
+      - name: Cache FreeBSD Build Artifacts (Layer 3 - Build Cache)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.freebsd-cargo-cache
+            ~/.freebsd-target-cache
+            ~/.freebsd-rust-cache
+          key: freebsd-build-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('src/**') }}
+          restore-keys: |
+            freebsd-build-${{ hashFiles('Cargo.lock') }}-
+            freebsd-build-
 
       - run: sudo rm /var/lib/dpkg/info/man-db.*
 
-      - name: Build
+      - name: Build with ULTIMATE VM caching
         uses: vmactions/freebsd-vm@966989c456d41351f095a421f60e71342d3bce41
         with:
+          mem: 4096
+          cpu: 4
           prepare: |
-            # Create cache directories
-            mkdir -p ~/.freebsd-vm-cache ~/.cargo-vm-cache
+            echo "=== Setting up FreeBSD base system ==="
+            mkdir -p ~/.freebsd-base-system ~/.freebsd-pkg-cache ~/.freebsd-ports-cache
             
-            # Update and install packages
-            pkg update -f
-            pkg install -y ${{ env.DEPS_PKG }}
-            
-            # Cache package info for future runs
-            pkg info > ~/.freebsd-vm-cache/installed-packages.txt
-          run: |
-            curl -o patch-pipewire_init 'https://cgit.freebsd.org/ports/plain/x11-wm/niri/files/patch-pipewire_init?id=f3f7e555b06d9a87d63c047ce3e82e936a11f2fe'
-            export CARGO_HOME="$PWD/cargo-home"
-            
-            # Copy cached cargo data if available
-            if [ -d ~/.cargo-vm-cache ]; then
-              cp -r ~/.cargo-vm-cache/* "$CARGO_HOME/" 2>/dev/null || true
+            if [ -d ~/.freebsd-base-system ] && [ -f ~/.freebsd-base-system/.initialized ]; then
+              echo "✓ Using cached base system"
+              export PKG_CACHEDIR=~/.freebsd-pkg-cache
+            else
+              echo "⚡ Initializing base system"
+              sysctl kern.maxfiles=65536 2>/dev/null || true
+              sysctl kern.maxfilesperproc=32768 2>/dev/null || true
+              touch ~/.freebsd-base-system/.initialized
             fi
             
+            echo "=== Managing FreeBSD packages ==="
+            export PKG_CACHEDIR=~/.freebsd-pkg-cache
+            mkdir -p "$PKG_CACHEDIR"
+            
+            if [ -f ~/.freebsd-pkg-cache/.deps_installed ]; then
+              echo "✓ Using cached packages"
+              pkg info -q git curl rust llvm || NEED_INSTALL=1
+            else
+              NEED_INSTALL=1
+            fi
+            
+            if [ "$NEED_INSTALL" = "1" ]; then
+              echo "⚡ Installing packages"
+              pkg update -f
+              pkg install -y ${{ env.DEPS_PKG }}
+              pkg info > ~/.freebsd-pkg-cache/installed-packages.txt
+              touch ~/.freebsd-pkg-cache/.deps_installed
+              echo "📦 Installed $(pkg info | wc -l) packages"
+            fi
+            
+          run: |
+            echo "=== FreeBSD Build Process ==="
+            
+            mkdir -p ~/.freebsd-cargo-cache ~/.freebsd-target-cache ~/.freebsd-rust-cache
+            export CARGO_HOME="$PWD/cargo-home"
+            
+            if [ -d ~/.freebsd-cargo-cache ] && [ -n "$(ls -A ~/.freebsd-cargo-cache 2>/dev/null)" ]; then
+              echo "✓ Restoring Cargo cache"
+              cp -r ~/.freebsd-cargo-cache/* "$CARGO_HOME/" 2>/dev/null || true
+            fi
+            
+            if [ -d ~/.freebsd-target-cache ] && [ -n "$(ls -A ~/.freebsd-target-cache 2>/dev/null)" ]; then
+              echo "✓ Restoring target cache"
+              mkdir -p target
+              cp -r ~/.freebsd-target-cache/* target/ 2>/dev/null || true
+            fi
+            
+            curl -o patch-pipewire_init 'https://cgit.freebsd.org/ports/plain/x11-wm/niri/files/patch-pipewire_init?id=f3f7e555b06d9a87d63c047ce3e82e936a11f2fe'
+            
+            export CARGO_BUILD_JOBS=4
+            export RUSTC_WRAPPER=""
+            export CARGO_TARGET_DIR="$PWD/target"
+            
+            echo "⚡ Fetching dependencies"
             cargo fetch
+            
+            echo "⚡ Applying patches"
             ( cd $CARGO_HOME/git/checkouts/pipewire-rs-*/*/; patch -p2 < $CARGO_HOME/../patch-pipewire_init; )
+            
+            echo "⚡ Building project"
             cargo build --offline --no-default-features --features dbus,xdp-gnome-screencast
             
-            # Cache cargo artifacts for next run
-            cp -r "$CARGO_HOME"/* ~/.cargo-vm-cache/ 2>/dev/null || true
+            echo "💾 Saving comprehensive build cache"
+            
+            if [ -d "$CARGO_HOME" ]; then
+              rm -rf ~/.freebsd-cargo-cache/*
+              cp -r "$CARGO_HOME"/* ~/.freebsd-cargo-cache/ 2>/dev/null || true
+              echo "✓ Saved Cargo cache ($(du -sh ~/.freebsd-cargo-cache 2>/dev/null | cut -f1))"
+            fi
+            
+            if [ -d target ]; then
+              rm -rf ~/.freebsd-target-cache/*
+              cp -r target/* ~/.freebsd-target-cache/ 2>/dev/null || true
+              echo "✓ Saved target cache ($(du -sh ~/.freebsd-target-cache 2>/dev/null | cut -f1))"
+            fi
+            
+            echo "🎉 FreeBSD build completed successfully!"
 
   nix:
     runs-on: ubuntu-24.04
