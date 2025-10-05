@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/cole/.cargo/**)",
+      "Read(//home/cole/RustProjects/forks/pipewire-rs/**)",
+      "Read(//usr/include/**)",
+      "Bash(pkg-config:*)",
+      "Bash(cargo check:*)",
+      "WebSearch",
+      "WebFetch(domain:smithay.github.io)",
+      "Bash(find:*)",
+      "Read(//home/cole/RustProjects/forks/smithay/**)",
+      "Read(//home/cole/RustProjects/forks/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

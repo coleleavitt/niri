@@ -1,0 +1,94 @@
+
+These are the packages that would be merged, in order:
+
+Calculating dependencies  
+ * IMPORTANT: 1 news items need reading for repository 'haskell'.
+ * IMPORTANT: 3 news items need reading for repository 'gentoo'.
+ * Use eselect news read to view new items.
+
+... done!
+Dependency resolution took 6.30 s (backtrack: 0/20).
+
+
+!!! Multiple package instances within a single package slot have been pulled
+!!! into the dependency graph, resulting in a slot conflict:
+
+app-crypt/gpgme:1
+
+  (app-crypt/gpgme-1.24.3-r1:1/11.6.15.2::gentoo, installed) USE="cxx python qt5 qt6 -common-lisp -debug -static-libs -test -verify-sig" ABI_X86="(64)" PYTHON_TARGETS="python3_12 python3_13 -python3_11 (-python3_14)" pulled in by
+    app-crypt/gpgme:1/11.6.15.2= required by (app-portage/portage-utils-0.97:0/0::gentoo, installed) USE="openmp qmanifest -static" ABI_X86="(64)"
+                   ^^^^^^^^^^^^^                                                                                                                   
+
+  (app-crypt/gpgme-2.0.0:1/45.0::gentoo, ebuild scheduled for merge) USE="-common-lisp -static-libs -test -verify-sig" ABI_X86="(64)" pulled in by
+    >=app-crypt/gpgme-2:= required by (dev-python/gpgmepy-2.0.0-r1:0/0::gentoo, ebuild scheduled for merge) USE="-debug -test" ABI_X86="(64)" PYTHON_TARGETS="python3_12 python3_13 -python3_11 (-python3_14)"
+    ^^                ^                                                                                                                                                                                        
+
+app-text/xmlto:0
+
+  (app-text/xmlto-0.0.28-r11:0/0::gentoo, ebuild scheduled for merge) USE="-latex -text" ABI_X86="(64)" pulled in by
+    (no parents that aren't satisfied by other packages in this slot)
+
+  (app-text/xmlto-0.0.28-r11-7:0/0::gentoo, installed) USE="text -latex" ABI_X86="(64)" pulled in by
+    >=app-text/xmlto-0.0.28-r3[text(+)] required by (x11-misc/xdg-utils-1.2.1-r9:0/0::gentoo, installed) USE="dbus -X -doc -gnome -perl -plasma" ABI_X86="(64)"
+                                                                                                                                                                
+
+dev-python/pillow:0
+
+  (dev-python/pillow-11.3.0:0/0::gentoo, ebuild scheduled for merge) USE="jpeg webp zlib -avif -debug -examples -imagequant -jpeg2k -lcms -test -tiff -tk -truetype -xcb" ABI_X86="(64)" PYTHON_TARGETS="python3_12 python3_13 (-pypy3_11) -python3_11 (-python3_14)" pulled in by
+    (no parents that aren't satisfied by other packages in this slot)
+
+  (dev-python/pillow-11.3.0:0/0::gentoo, installed) USE="jpeg lcms tiff truetype webp xcb zlib -avif -debug -examples -imagequant -jpeg2k -test -tk" ABI_X86="(64)" PYTHON_TARGETS="python3_12 python3_13 (-pypy3_11) -python3_11 (-python3_14)" pulled in by
+    dev-python/pillow[tiff,truetype,jpeg(+),python_targets_python3_11(-)?,python_targets_python3_12(-)?,python_targets_python3_13(-)?,python_targets_python3_14(-)?] required by (dev-python/reportlab-4.4.3:0/0::gentoo, installed) USE="-debug -doc" ABI_X86="(64)" PYTHON_TARGETS="python3_12 python3_13 -python3_11 (-python3_14)"
+                      ^^^^ ^^^^^^^^                                                                                                                                                                                                                                                                                                    
+
+media-libs/tiff:0
+
+  (media-libs/tiff-4.7.0-r1:0/6::gentoo, ebuild scheduled for merge) USE="cxx zlib -jbig -jpeg -lerc -libdeflate -lzma -opengl -static-libs -test -verify-sig -webp -zstd" ABI_X86="(64) -32 (-x32)" pulled in by
+    (no parents that aren't satisfied by other packages in this slot)
+
+  (media-libs/tiff-4.7.0-r1:0/6::gentoo, installed) USE="cxx jpeg opengl zlib -jbig -lerc -libdeflate -lzma -static-libs -test -verify-sig -webp -zstd" ABI_X86="(64) -32 (-x32)" pulled in by
+    media-libs/tiff:0/6=[jpeg,zlib] required by (dev-python/pillow-11.3.0:0/0::gentoo, installed) USE="jpeg lcms tiff truetype webp xcb zlib -avif -debug -examples -imagequant -jpeg2k -test -tk" ABI_X86="(64)" PYTHON_TARGETS="python3_12 python3_13 (-pypy3_11) -python3_11 (-python3_14)"
+                         ^^^^                                                                                                                                                                                                                                                                  
+    media-libs/tiff:=[jpeg,zlib] required by (dev-python/pillow-11.3.0:0/0::gentoo, installed) USE="jpeg lcms tiff truetype webp xcb zlib -avif -debug -examples -imagequant -jpeg2k -test -tk" ABI_X86="(64)" PYTHON_TARGETS="python3_12 python3_13 (-pypy3_11) -python3_11 (-python3_14)"
+                      ^^^^                                                                                                                                                                                                                                                                  
+
+app-text/poppler:0
+
+  (app-text/poppler-25.07.0:0/151::gentoo, ebuild scheduled for merge) USE="cxx introspection jpeg jpeg2k lcms utils -boost -cairo -cjk -curl -debug -doc -gpgme -nss -png -qt5 -qt6 -test -tiff -verify-sig" ABI_X86="(64)" pulled in by
+    (no parents that aren't satisfied by other packages in this slot)
+
+  (app-text/poppler-25.07.0:0/151::gentoo, installed) USE="boost cairo cxx introspection jpeg jpeg2k lcms nss png qt5 qt6 tiff utils -cjk -curl -debug -doc -gpgme -test -verify-sig" ABI_X86="(64)" pulled in by
+    app-text/poppler[cairo] required by (media-gfx/sane-backends-1.3.1-r2:0/0::gentoo, installed) USE="systemd usb zeroconf -gphoto2 -snmp -threads -v4l -xinetd" ABI_X86="(64) -32 (-x32)" SANE_BACKENDS="abaton agfafocus apple artec artec_eplus48u as6e avision bh canon canon630u canon_dr canon_lide70 cardscan coolscan coolscan2 coolscan3 dc210 dc240 dc25 dell1600n_net dmc epjitsu epson epson2 epsonds escl fujitsu genesys gt68xx hp hp3500 hp3900 hp4200 hp5400 hp5590 hpljm1005 hs2p ibm kodak kodakaio kvs1025 kvs20xx leo lexmark ma1509 magicolor matsushita microtek microtek2 mustek mustek_usb nec net niash p5 pie pieusb pixma plustek plustek_pp qcam ricoh ricoh2 rts8891 s9036 sceptre sharp sm3600 sm3840 snapscan sp15c st400 stv680 tamarack teco1 teco2 teco3 test u12 umax umax1220u umax_pp xerox_mfp -canon_pp -hpsj5s -kvs40xx -mustek_pp -mustek_usb2 -pnm"
+                     ^^^^^                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
+
+media-libs/harfbuzz:0
+
+  (media-libs/harfbuzz-11.2.1:0/6.0.0::gentoo, ebuild scheduled for merge) USE="cairo glib graphite introspection truetype -debug -doc -experimental -icu -test" ABI_X86="32 (64) (-x32)" pulled in by
+    (no parents that aren't satisfied by other packages in this slot)
+
+  (media-libs/harfbuzz-11.2.1:0/6.0.0::gentoo, installed) USE="cairo glib graphite icu introspection truetype -debug -doc -experimental -test" ABI_X86="32 (64) (-x32)" pulled in by
+    media-libs/harfbuzz:=[icu(+)] required by (net-libs/webkit-gtk-2.48.5-r600:6/0::gentoo, ebuild scheduled for merge) USE="gstreamer introspection jumbo-build (seccomp) systemd wayland -X (-aqua) -avif -examples -gamepad -jpegxl -keyring -lcms -pdf -spell" ABI_X86="(64)"
+                                                                                                                                                                                                                                                                                  
+
+
+It may be possible to solve this problem by using package.mask to
+prevent one of those packages from being selected. However, it is also
+possible that conflicting dependencies exist such that they are
+impossible to satisfy simultaneously.  If such a conflict exists in
+the dependencies of two different packages, then those packages can
+not be installed simultaneously. You may want to try a larger value of
+the --backtrack option, such as --backtrack=30, in order to see if
+that will solve this conflict automatically.
+
+For more information, see MASKED PACKAGES section in the emerge man
+page or refer to the Gentoo Handbook.
+
+
+emerge: there are no ebuilds built with USE flags to satisfy "~dev-qt/qtbase-6.9.2:6[opengl=]".
+!!! One of the following packages is required to complete your request:
+- dev-qt/qtbase-6.9.2::gentoo (Change USE: -opengl)
+- dev-qt/qttools-6.9.2::gentoo (Change USE: +opengl)
+(dependency required by "dev-qt/qttools-6.9.2::gentoo" [ebuild])
+(dependency required by "net-analyzer/wireshark-4.4.9::gentoo[gui]" [ebuild])
+(dependency required by "@selected" [set])
+(dependency required by "@world" [argument])

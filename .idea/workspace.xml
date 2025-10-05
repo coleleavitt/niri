@@ -6,30 +6,26 @@
   <component name="CargoProjects">
     <cargoProject FILE="$PROJECT_DIR$/Cargo.toml">
       <package file="$PROJECT_DIR$">
-        <enabledFeature name="default" />
+        <feature name="default" enabled="true" />
       </package>
       <package file="$PROJECT_DIR$/niri-config">
-        <enabledFeature name="default" />
+        <feature name="default" enabled="true" />
       </package>
       <package file="$PROJECT_DIR$/niri-egl-wrapper">
-        <enabledFeature name="default" />
+        <feature name="default" enabled="true" />
       </package>
       <package file="$PROJECT_DIR$/niri-ipc">
-        <enabledFeature name="default" />
-        <enabledFeature name="clap" />
+        <feature name="default" enabled="true" />
+        <feature name="clap" enabled="true" />
       </package>
       <package file="$PROJECT_DIR$/niri-visual-tests">
-        <enabledFeature name="default" />
+        <feature name="default" enabled="true" />
       </package>
     </cargoProject>
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="7357a20f-4ae3-4a02-bab6-099076da6bb7" name="Changes" comment="">
+    <list default="true" id="7357a20f-4ae3-4a02-bab6-099076da6bb7" name="Changes" comment="chore: update .gitignore to include debug, target, and backup files">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/niri-visual-tests/src/cases/gradient_area.rs" beforeDir="false" afterPath="$PROJECT_DIR$/niri-visual-tests/src/cases/gradient_area.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/layout/focus_ring.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/layout/focus_ring.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/render_helpers/border.rs" beforeDir="false" afterPath="$PROJECT_DIR$/src/render_helpers/border.rs" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/render_helpers/shaders/open_prelude.frag" beforeDir="false" afterPath="$PROJECT_DIR$/src/render_helpers/shaders/open_prelude.frag" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -87,7 +83,7 @@
     &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.rust.reset.selective.auto.import&quot;: &quot;true&quot;,
     &quot;git-widget-placeholder&quot;: &quot;update__sync&quot;,
-    &quot;last_opened_file_path&quot;: &quot;/home/cole/projects/niri&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/home/cole/RustProjects/active/iOSvortex&quot;,
     &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
     &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
     &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
@@ -96,7 +92,7 @@
     &quot;org.rust.cargo.project.model.PROJECT_DISCOVERY&quot;: &quot;true&quot;,
     &quot;org.rust.cargo.project.model.impl.CargoExternalSystemProjectAware.subscribe.first.balloon&quot;: &quot;&quot;,
     &quot;org.rust.hideNoCargoProjectNotifications/home/cole/projects/niri/pipewire-rs/Cargo.toml&quot;: &quot;true&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;editor.preferences.fonts.default&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.pluginManager&quot;,
     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
 }</component>
@@ -277,7 +273,49 @@
       <workItem from="1754427572199" duration="5300000" />
       <workItem from="1754787773711" duration="301000" />
       <workItem from="1754788999978" duration="1159000" />
+      <workItem from="1754795512866" duration="26000" />
+      <workItem from="1757281019204" duration="534000" />
+      <workItem from="1757282308900" duration="472000" />
+      <workItem from="1757283859908" duration="368000" />
+      <workItem from="1757290025954" duration="106000" />
+      <workItem from="1757291240624" duration="1114000" />
+      <workItem from="1757359861686" duration="314000" />
+      <workItem from="1757378965806" duration="6726000" />
+      <workItem from="1757390389832" duration="477000" />
     </task>
+    <task id="LOCAL-00001" summary="chore: update dependencies for png and proptest-derive">
+      <option name="closed" value="true" />
+      <created>1757282356844</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1757282356844</updated>
+    </task>
+    <task id="LOCAL-00002" summary="feat: enhance sync timeline handling with async support and improved error handling">
+      <option name="closed" value="true" />
+      <created>1757290108615</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1757290108615</updated>
+    </task>
+    <task id="LOCAL-00003" summary="feat: implement DRM syncobj timeline initialization and async buffer handling">
+      <option name="closed" value="true" />
+      <created>1757381067567</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1757381067567</updated>
+    </task>
+    <task id="LOCAL-00004" summary="chore: update .gitignore to include debug, target, and backup files">
+      <option name="closed" value="true" />
+      <created>1757381138803</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1757381138803</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -294,12 +332,19 @@
       </map>
     </option>
   </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="chore: update dependencies for png and proptest-derive" />
+    <MESSAGE value="feat: enhance sync timeline handling with async support and improved error handling" />
+    <MESSAGE value="feat: implement DRM syncobj timeline initialization and async buffer handling" />
+    <MESSAGE value="chore: update .gitignore to include debug, target, and backup files" />
+    <option name="LAST_COMMIT_MESSAGE" value="chore: update .gitignore to include debug, target, and backup files" />
+  </component>
   <component name="XDebuggerManager">
     <breakpoint-manager>
       <breakpoints>
         <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
           <url>file://$PROJECT_DIR$/../smithay/src/backend/renderer/gles/mod.rs</url>
-          <line>2048</line>
+          <line>2122</line>
           <option name="timeStamp" value="1" />
         </line-breakpoint>
       </breakpoints>
