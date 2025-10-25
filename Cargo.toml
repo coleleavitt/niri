@@ -28,13 +28,13 @@ tracy-client = { version = "0.18.0", default-features = false }
 [workspace.dependencies.smithay]
 # version = "0.4.1"
 # git = "https://github.com/Smithay/smithay.git"
-path = "../smithay"
+path = "../../forks/smithay"
 default-features = false
 
 [workspace.dependencies.smithay-drm-extras]
 # version = "0.1.0"
 # git = "https://github.com/Smithay/smithay.git"
-path = "../smithay/smithay-drm-extras"
+path = "../../forks/smithay/smithay-drm-extras"
 
 [package]
 name = "niri"
@@ -91,7 +91,7 @@ wayland-backend = "0.3.8"
 wayland-scanner = "0.31.6"
 xcursor = "0.3.8"
 zbus = { version = "5.5.0", optional = true }
-pipewire = { path = "../pipewire-rs/pipewire", optional = true, features = ["v0_3_77"] }
+pipewire = { path = "../../forks/pipewire-rs/pipewire", optional = true, features = ["v0_3_77"] }
 
 
 [dependencies.smithay]

@@ -10,7 +10,10 @@
       "WebFetch(domain:smithay.github.io)",
       "Bash(find:*)",
       "Read(//home/cole/RustProjects/forks/smithay/**)",
-      "Read(//home/cole/RustProjects/forks/**)"
+      "Read(//home/cole/RustProjects/forks/**)",
+      "Bash(G_MESSAGES_DEBUG=all /usr/libexec/xdg-desktop-portal:*)",
+      "Bash(curl:*)",
+      "Bash(niri --version:*)"
     ],
     "deny": [],
     "ask": []
