@@ -74,6 +74,7 @@ pub struct Config {
     pub spawn_sh_at_startup: Vec<SpawnShAtStartup>,
     pub layout: Layout,
     pub prefer_no_csd: bool,
+    pub disable_laptop_panel_when_externals_connected: bool,
     pub cursor: Cursor,
     pub screenshot_path: ScreenshotPath,
     pub clipboard: Clipboard,
@@ -236,6 +237,13 @@ where
 
                 "prefer-no-csd" => {
                     config.borrow_mut().prefer_no_csd = Flag::decode_node(node, ctx)?.0
+                }
+
+                "disable-laptop-panel-when-externals-connected" => {
+                    config
+                        .borrow_mut()
+                        .disable_laptop_panel_when_externals_connected =
+                        Flag::decode_node(node, ctx)?.0
                 }
 
                 "screenshot-path" => {
