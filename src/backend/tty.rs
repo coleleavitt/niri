@@ -2356,20 +2356,26 @@ impl Tty {
     }
 
     fn should_disable_laptop_panels(&self, is_lid_closed: bool) -> bool {
-        if !is_lid_closed {
-            return false;
+        let config = self.config.borrow();
+
+        // Check if any external monitor is connected.
+        let has_external = self.devices.values().any(|device| {
+            device
+                .drm_scanner
+                .crtcs()
+                .any(|(connector, _crtc)| !is_laptop_panel(&format_connector_name(connector)))
+        });
+
+        // If the user wants to disable the laptop panel whenever externals are
+        // connected, honour that regardless of lid state.
+        if config.disable_laptop_panel_when_externals_connected && has_external {
+            return true;
         }
 
-        let config = self.config.borrow();
-        if !config.debug.keep_laptop_panel_on_when_lid_is_closed {
-            // Check if any external monitor is connected.
-            for device in self.devices.values() {
-                for (connector, _crtc) in device.drm_scanner.crtcs() {
-                    if !is_laptop_panel(&format_connector_name(connector)) {
-                        return true;
-                    }
-                }
-            }
+        // Original behaviour: disable laptop panel when lid is closed and an
+        // external monitor is present (unless the debug override is set).
+        if is_lid_closed && !config.debug.keep_laptop_panel_on_when_lid_is_closed && has_external {
+            return true;
         }
 
         false
