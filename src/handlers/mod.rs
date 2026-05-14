@@ -757,6 +757,12 @@ impl GammaControlHandler for State {
     }
 
     fn set_gamma(&mut self, output: &Output, ramp: Option<Vec<u16>>) -> Option<()> {
+        // When an external client sets gamma, pause the built-in night-light.
+        // When it disconnects (ramp=None), resume.
+        if let Some(night_light) = &mut self.niri.night_light {
+            night_light.set_external_gamma_active(ramp.is_some());
+        }
+
         match self.backend.tty().set_gamma(output, ramp) {
             Ok(()) => Some(()),
             Err(err) => {

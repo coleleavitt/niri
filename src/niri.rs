@@ -413,6 +413,9 @@ pub struct Niri {
 
     pub satellite: Option<Satellite>,
 
+    pub night_light: Option<crate::night_light::NightLight>,
+    pub night_light_timer: Option<RegistrationToken>,
+
     #[cfg(feature = "xdp-gnome-screencast")]
     pub casting: Screencasting,
 }
@@ -691,6 +694,41 @@ impl KeyboardFocus {
 
     pub fn is_overview(&self) -> bool {
         matches!(self, KeyboardFocus::Overview)
+    }
+}
+
+const NVIDIA_PROCFS_SUSPEND: &str = "/proc/driver/nvidia/suspend";
+const NVIDIA_PM_HELPER: &str = "/usr/local/bin/nvidia-pm-helper";
+
+fn nvidia_procfs_suspend() {
+    if !std::path::Path::new(NVIDIA_PROCFS_SUSPEND).exists() {
+        return;
+    }
+    debug!("triggering NVIDIA procfs suspend");
+    if let Err(err) = std::fs::write(NVIDIA_PROCFS_SUSPEND, "suspend\n") {
+        debug!("direct procfs write failed ({err}), trying nvidia-pm-helper");
+        if let Err(err) = std::process::Command::new(NVIDIA_PM_HELPER)
+            .arg("suspend")
+            .status()
+        {
+            warn!("nvidia-pm-helper suspend failed: {err}");
+        }
+    }
+}
+
+fn nvidia_procfs_resume() {
+    if !std::path::Path::new(NVIDIA_PROCFS_SUSPEND).exists() {
+        return;
+    }
+    debug!("triggering NVIDIA procfs resume");
+    if let Err(err) = std::fs::write(NVIDIA_PROCFS_SUSPEND, "resume\n") {
+        debug!("direct procfs write failed ({err}), trying nvidia-pm-helper");
+        if let Err(err) = std::process::Command::new(NVIDIA_PM_HELPER)
+            .arg("resume")
+            .status()
+        {
+            warn!("nvidia-pm-helper resume failed: {err}");
+        }
     }
 }
 
@@ -1713,7 +1751,74 @@ impl State {
         // global suddenly appearing? Either way, right now it's live-reloaded in a sense that new
         // clients will use the new xdg-decoration setting.
 
+        // Reload night-light configuration.
+        {
+            let config = self.niri.config.borrow();
+            if let Some(night_light) = &mut self.niri.night_light {
+                night_light.update_config(&config.night_light);
+            } else {
+                // Night-light was not enabled before; try to create it now.
+                self.niri.night_light = crate::night_light::NightLight::new(&config.night_light);
+                if self.niri.night_light.is_some() && self.niri.night_light_timer.is_none() {
+                    let token = self
+                        .niri
+                        .event_loop
+                        .insert_source(
+                            Timer::from_duration(Duration::from_secs(1)),
+                            |_, _, state| {
+                                state.night_light_tick();
+                                TimeoutAction::ToDuration(Duration::from_secs(60))
+                            },
+                        )
+                        .ok();
+                    self.niri.night_light_timer = token;
+                }
+            }
+        }
+
         self.niri.queue_redraw_all();
+    }
+
+    /// Periodic callback for the night-light feature.
+    /// Computes the current solar elevation, derives color temperature,
+    /// and applies gamma ramps to all outputs.
+    pub fn night_light_tick(&mut self) {
+        let Some(night_light) = &mut self.niri.night_light else {
+            return;
+        };
+
+        let Some((temp, brightness)) = night_light.tick() else {
+            return;
+        };
+
+        if !night_light.should_apply() {
+            return;
+        }
+
+        trace!("night-light: applying temperature {temp}K, brightness {brightness:.2}");
+
+        // Apply gamma to all outputs.
+        let Backend::Tty(tty) = &mut self.backend else {
+            return;
+        };
+
+        for output in self.niri.sorted_outputs.clone() {
+            let gamma_size = match tty.get_gamma_size(&output) {
+                Ok(0) => continue,
+                Ok(size) => size as usize,
+                Err(_) => continue,
+            };
+
+            let ramp =
+                crate::night_light::gamma::generate_gamma_ramp(gamma_size as u32, temp, brightness);
+
+            if let Err(err) = tty.set_gamma(&output, Some(ramp)) {
+                warn!(
+                    "night-light: failed to set gamma for {}: {err:?}",
+                    output.name()
+                );
+            }
+        }
     }
 
     pub fn reload_output_config(&mut self) {
@@ -2197,10 +2302,37 @@ impl State {
 
     #[cfg(feature = "dbus")]
     pub fn on_login1_msg(&mut self, msg: Login1ToNiri) {
-        let Login1ToNiri::LidClosedChanged(is_closed) = msg;
+        match msg {
+            Login1ToNiri::LidClosedChanged(is_closed) => {
+                trace!("login1 lid {}", if is_closed { "closed" } else { "opened" });
+                self.set_lid_closed(is_closed);
+            }
+            Login1ToNiri::PrepareForSleep(going_to_sleep) => {
+                if going_to_sleep {
+                    debug!("PrepareForSleep: entering sleep");
 
-        trace!("login1 lid {}", if is_closed { "closed" } else { "opened" });
-        self.set_lid_closed(is_closed);
+                    // NVIDIA open kernel modules with PreserveVideoMemoryAllocations=1
+                    // require the procfs suspend interface before kernel PM ops fire.
+                    // Without this, nv_pmops_suspend/freeze rejects with EIO.
+                    nvidia_procfs_suspend();
+                } else {
+                    debug!("PrepareForSleep: waking up");
+
+                    nvidia_procfs_resume();
+
+                    // Force monitors active in case ActivateSession already
+                    // ran but the compositor state wasn't fully restored.
+                    if !self.niri.monitors_active {
+                        debug!("PrepareForSleep: monitors were inactive, re-activating");
+                        self.niri.monitors_active = true;
+                        self.backend.set_monitors_active(true);
+                    }
+
+                    self.backend.on_output_config_changed(&mut self.niri);
+                    self.niri.queue_redraw_all();
+                }
+            }
+        }
     }
 
     #[cfg(feature = "dbus")]
@@ -2483,6 +2615,8 @@ impl Niri {
             )
             .unwrap();
 
+        let night_light = crate::night_light::NightLight::new(&config_.night_light);
+
         drop(config_);
         let mut niri = Self {
             config,
@@ -2625,11 +2759,29 @@ impl Niri {
 
             satellite: None,
 
+            night_light,
+            night_light_timer: None,
+
             #[cfg(feature = "xdp-gnome-screencast")]
             casting: screencasting,
         };
 
         niri.reset_pointer_inactivity_timer();
+
+        // Register the night-light timer if the feature is enabled.
+        if niri.night_light.is_some() {
+            let token = niri
+                .event_loop
+                .insert_source(
+                    Timer::from_duration(Duration::from_secs(1)),
+                    |_, _, state| {
+                        state.night_light_tick();
+                        TimeoutAction::ToDuration(Duration::from_secs(60))
+                    },
+                )
+                .ok();
+            niri.night_light_timer = token;
+        }
 
         niri
     }

@@ -38,6 +38,7 @@ pub mod input;
 pub mod layer_rule;
 pub mod layout;
 pub mod misc;
+pub mod night_light;
 pub mod output;
 pub mod recent_windows;
 pub mod utils;
@@ -54,6 +55,7 @@ pub use crate::input::{Input, ModKey, ScrollMethod, TrackLayout, WarpMouseToFocu
 pub use crate::layer_rule::LayerRule;
 pub use crate::layout::*;
 pub use crate::misc::*;
+pub use crate::night_light::NightLight;
 pub use crate::output::{Output, OutputName, Outputs, Position, Vrr};
 use crate::recent_windows::RecentWindowsPart;
 pub use crate::recent_windows::{MruDirection, MruFilter, MruPreviews, MruScope, RecentWindows};
@@ -83,6 +85,7 @@ pub struct Config {
     pub animations: Animations,
     pub blur: Blur,
     pub gestures: Gestures,
+    pub night_light: NightLight,
     pub overview: Overview,
     pub environment: Environment,
     pub xwayland_satellite: XwaylandSatellite,
@@ -200,6 +203,7 @@ where
                 "animations" => m_merge!(animations),
                 "blur" => m_merge!(blur),
                 "gestures" => m_merge!(gestures),
+                "night-light" => m_merge!(night_light),
                 "overview" => m_merge!(overview),
                 "xwayland-satellite" => m_merge!(xwayland_satellite),
                 "switch-events" => m_merge!(switch_events),
@@ -1491,6 +1495,7 @@ mod tests {
                 },
             },
             prefer_no_csd: true,
+            disable_laptop_panel_when_externals_connected: false,
             cursor: Cursor {
                 xcursor_theme: "breeze_cursors",
                 xcursor_size: 16,
@@ -1679,6 +1684,15 @@ mod tests {
                     bottom_left: false,
                     bottom_right: false,
                 },
+            },
+            night_light: NightLight {
+                off: false,
+                latitude: None,
+                longitude: None,
+                temperature_day: 6500,
+                temperature_night: 3500,
+                transition_duration: 30,
+                brightness_night: 1.0,
             },
             overview: Overview {
                 zoom: 0.5,
