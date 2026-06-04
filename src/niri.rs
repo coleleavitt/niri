@@ -993,6 +993,7 @@ impl State {
 
     pub fn confirm_mru(&mut self) {
         if let Some(window) = self.niri.close_mru(MruCloseRequest::Confirm) {
+            self.update_keyboard_focus();
             self.focus_window(&window);
         }
     }
