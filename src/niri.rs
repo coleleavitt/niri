@@ -993,7 +993,12 @@ impl State {
 
     pub fn confirm_mru(&mut self) {
         if let Some(window) = self.niri.close_mru(MruCloseRequest::Confirm) {
+            // focus_window() will warp the cursor to the window only when the keyboard focus is on
+            // the layout. However, right now the keyboard focus is still on the MRU (that we had
+            // just closed) since it's only updated at the end of the event loop cycle. Force-update
+            // the keyboard focus here to make cursor warping work.
             self.update_keyboard_focus();
+
             self.focus_window(&window);
         }
     }
