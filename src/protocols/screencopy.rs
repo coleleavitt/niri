@@ -649,6 +649,14 @@ pub enum ScreencopyBuffer {
     Shm(WlBuffer),
 }
 
+impl ScreencopyBuffer {
+    fn release(&self) {
+        if let ScreencopyBuffer::Shm(buffer) = self {
+            buffer.release();
+        }
+    }
+}
+
 /// Screencopy frame.
 pub struct Screencopy {
     info: ScreencopyFrameInfo,
@@ -663,6 +671,8 @@ impl Drop for Screencopy {
         if !self.submitted {
             self.frame.failed();
         }
+
+        self.buffer.release();
     }
 }
 
