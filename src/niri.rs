@@ -6086,6 +6086,10 @@ impl Niri {
             return;
         }
 
+        if Some(surface) != self.keyboard_focus.surface() {
+            return;
+        }
+
         with_pointer_constraint(surface, &pointer, |constraint| {
             let Some(constraint) = constraint else { return };
 
