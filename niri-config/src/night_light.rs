@@ -68,6 +68,12 @@ impl MergeWith<NightLightPart> for NightLight {
             self.off = true;
         }
         merge_clone_opt!((self, part), latitude, longitude);
-        merge_clone!((self, part), temperature_day, temperature_night, transition_duration, brightness_night);
+        merge_clone!(
+            (self, part),
+            temperature_day,
+            temperature_night,
+            transition_duration,
+            brightness_night
+        );
     }
 }

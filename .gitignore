@@ -2,3 +2,11 @@
 /result
 
 .idea
+# ACPI table dumps captured during debug sessions
+*.dat
+
+# Local debug/research artifacts
+logs/
+research/
+gammastep/
+libsolar.rlib
