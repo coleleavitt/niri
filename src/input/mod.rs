@@ -534,6 +534,15 @@ impl State {
                     this.niri.screenshot_ui.set_space_down(pressed);
                 }
 
+                let disable_power_key_handling =
+                    this.niri.config.borrow().input.disable_power_key_handling;
+                let suppress_power_key_after_resume = !disable_power_key_handling
+                    && pressed
+                    && is_power_key(modified)
+                    && this
+                        .niri
+                        .take_power_key_resume_suppression(get_monotonic_time());
+
                 let res = {
                     let config = this.niri.config.borrow();
                     let bindings =
@@ -549,7 +558,8 @@ impl State {
                         pressed,
                         *mods,
                         &this.niri.screenshot_ui,
-                        this.niri.config.borrow().input.disable_power_key_handling,
+                        disable_power_key_handling,
+                        suppress_power_key_after_resume,
                         is_inhibiting_shortcuts,
                     )
                 };
@@ -3071,10 +3081,17 @@ impl State {
         pointer.frame(self);
     }
 
-    fn on_pointer_axis<I: InputBackend>(&mut self, event: I::PointerAxisEvent) {
+    fn on_pointer_axis<I: InputBackend>(&mut self, event: I::PointerAxisEvent)
+    where
+        I::Device: 'static,
+    {
         let pointer = &self.niri.seat.get_pointer().unwrap();
 
         let source = event.source();
+        let device = event.device();
+        let device_kind = (&device as &dyn Any)
+            .downcast_ref::<input::Device>()
+            .and_then(libinput_scroll_factor_device_kind);
 
         let mod_key = self.backend.mod_key(&self.niri.config.borrow());
 
@@ -3484,11 +3501,7 @@ impl State {
 
         let device_scroll_factor = {
             let config = self.niri.config.borrow();
-            match source {
-                AxisSource::Wheel => config.input.mouse.scroll_factor,
-                AxisSource::Finger => config.input.touchpad.scroll_factor,
-                _ => None,
-            }
+            scroll_factor_for_axis_source(&config.input, source, device_kind)
         };
 
         // Get window-specific scroll factor
@@ -4409,6 +4422,7 @@ fn should_intercept_key<'a>(
     mods: ModifiersState,
     screenshot_ui: &ScreenshotUi,
     disable_power_key_handling: bool,
+    suppress_power_key_after_resume: bool,
     is_inhibiting_shortcuts: bool,
 ) -> FilterResult<Option<Bind>> {
     // Actions are only triggered on presses, release of the key
@@ -4418,6 +4432,15 @@ fn should_intercept_key<'a>(
         return FilterResult::Forward;
     }
 
+    if pressed
+        && suppress_power_key_after_resume
+        && !disable_power_key_handling
+        && is_power_key(modified)
+    {
+        suppressed_keys.insert(key_code);
+        return FilterResult::Intercept(None);
+    }
+
     let mut final_bind = find_bind(
         bindings,
         mod_key,
@@ -4425,6 +4448,7 @@ fn should_intercept_key<'a>(
         raw,
         mods,
         disable_power_key_handling,
+        suppress_power_key_after_resume,
     );
 
     // Allow only a subset of compositor actions while the screenshot UI is open, since the user
@@ -4489,6 +4513,7 @@ fn find_bind<'a>(
     raw: Option<Keysym>,
     mods: ModifiersState,
     disable_power_key_handling: bool,
+    _suppress_power_key_after_resume: bool,
 ) -> Option<Bind> {
     use keysyms::*;
 
@@ -4526,6 +4551,10 @@ fn find_bind<'a>(
 
     let trigger = Trigger::Keysym(raw?);
     find_configured_bind(bindings, mod_key, trigger, mods)
+}
+
+fn is_power_key(keysym: Keysym) -> bool {
+    keysym.raw() == keysyms::KEY_XF86PowerOff
 }
 
 fn find_configured_bind<'a>(
@@ -4763,8 +4792,8 @@ fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState) -> Option<Bind> {
 }
 
 pub fn apply_libinput_settings(config: &niri_config::Input, device: &mut input::Device) {
-    // According to Mutter code, this setting is specific to touchpads.
-    let is_touchpad = device.config_tap_finger_count() > 0;
+    let device_kind = libinput_scroll_factor_device_kind(device);
+    let is_touchpad = device_kind == Some(ScrollFactorDeviceKind::Touchpad);
     if is_touchpad {
         let c = &config.touchpad;
         let _ = device.config_send_events_set_mode(if c.off {
@@ -4841,25 +4870,9 @@ pub fn apply_libinput_settings(config: &niri_config::Input, device: &mut input::
         }
     }
 
-    // This is how Mutter tells apart mice.
-    let mut is_trackball = false;
-    let mut is_trackpoint = false;
-    if let Some(udev_device) = unsafe { device.udev_device() } {
-        if udev_device.property_value("ID_INPUT_TRACKBALL").is_some() {
-            is_trackball = true;
-        }
-        if udev_device
-            .property_value("ID_INPUT_POINTINGSTICK")
-            .is_some()
-        {
-            is_trackpoint = true;
-        }
-    }
-
-    let is_mouse = device.has_capability(input::DeviceCapability::Pointer)
-        && !is_touchpad
-        && !is_trackball
-        && !is_trackpoint;
+    let is_trackball = device_kind == Some(ScrollFactorDeviceKind::Trackball);
+    let is_trackpoint = device_kind == Some(ScrollFactorDeviceKind::Trackpoint);
+    let is_mouse = device_kind == Some(ScrollFactorDeviceKind::Mouse);
     if is_mouse {
         let c = &config.mouse;
         let _ = device.config_send_events_set_mode(if c.off {
@@ -5052,6 +5065,51 @@ pub fn apply_libinput_settings(config: &niri_config::Input, device: &mut input::
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollFactorDeviceKind {
+    Touchpad,
+    Mouse,
+    Trackball,
+    Trackpoint,
+}
+
+fn libinput_scroll_factor_device_kind(device: &input::Device) -> Option<ScrollFactorDeviceKind> {
+    // According to Mutter code, this setting is specific to touchpads.
+    if device.config_tap_finger_count() > 0 {
+        return Some(ScrollFactorDeviceKind::Touchpad);
+    }
+
+    // This is how Mutter tells apart mice.
+    let mut is_trackball = false;
+    let mut is_trackpoint = false;
+    // SAFETY: [Category 8 - FFI boundary UB]
+    // Smithay/libinput owns the udev device for the lifetime of `device`. We only query
+    // properties through the borrowed handle and never store it beyond this call.
+    if let Some(udev_device) = unsafe { device.udev_device() } {
+        if udev_device.property_value("ID_INPUT_TRACKBALL").is_some() {
+            is_trackball = true;
+        }
+        if udev_device
+            .property_value("ID_INPUT_POINTINGSTICK")
+            .is_some()
+        {
+            is_trackpoint = true;
+        }
+    }
+    if is_trackball {
+        return Some(ScrollFactorDeviceKind::Trackball);
+    }
+    if is_trackpoint {
+        return Some(ScrollFactorDeviceKind::Trackpoint);
+    }
+
+    if device.has_capability(input::DeviceCapability::Pointer) {
+        Some(ScrollFactorDeviceKind::Mouse)
+    } else {
+        None
+    }
+}
+
 pub fn mods_with_binds(mod_key: ModKey, binds: &Binds, triggers: &[Trigger]) -> HashSet<Modifiers> {
     let mut rv = HashSet::new();
     for bind in &binds.0 {
@@ -5171,12 +5229,119 @@ fn make_binds_iter<'a>(
     general_binds.chain(mru_binds).chain(mru_open_binds)
 }
 
+fn scroll_factor_for_axis_source(
+    input: &niri_config::Input,
+    source: AxisSource,
+    device_kind: Option<ScrollFactorDeviceKind>,
+) -> Option<niri_config::input::ScrollFactor> {
+    if let Some(kind) = device_kind {
+        return match kind {
+            ScrollFactorDeviceKind::Touchpad => input.touchpad.scroll_factor,
+            ScrollFactorDeviceKind::Mouse => input.mouse.scroll_factor,
+            ScrollFactorDeviceKind::Trackball => input.trackball.scroll_factor,
+            ScrollFactorDeviceKind::Trackpoint => None,
+        };
+    }
+
+    match source {
+        AxisSource::Wheel => input.mouse.scroll_factor,
+        AxisSource::Finger | AxisSource::Continuous => input.touchpad.scroll_factor,
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
 
     use super::*;
     use crate::animation::Clock;
+
+    #[test]
+    fn scroll_factor_falls_back_to_axis_source_without_device_kind() {
+        let mut input = niri_config::Input::default();
+        let touchpad_factor = niri_config::input::ScrollFactor {
+            base: Some(niri_config::FloatOrInt(2.0)),
+            horizontal: None,
+            vertical: None,
+        };
+        let mouse_factor = niri_config::input::ScrollFactor {
+            base: Some(niri_config::FloatOrInt(3.0)),
+            horizontal: None,
+            vertical: None,
+        };
+        input.touchpad.scroll_factor = Some(touchpad_factor);
+        input.mouse.scroll_factor = Some(mouse_factor);
+
+        assert_eq!(
+            scroll_factor_for_axis_source(&input, AxisSource::Finger, None),
+            Some(touchpad_factor)
+        );
+        assert_eq!(
+            scroll_factor_for_axis_source(&input, AxisSource::Continuous, None),
+            Some(touchpad_factor)
+        );
+        assert_eq!(
+            scroll_factor_for_axis_source(&input, AxisSource::Wheel, None),
+            Some(mouse_factor)
+        );
+    }
+
+    #[test]
+    fn scroll_factor_uses_libinput_device_kind_before_axis_source() {
+        let mut input = niri_config::Input::default();
+        let touchpad_factor = niri_config::input::ScrollFactor {
+            base: Some(niri_config::FloatOrInt(2.0)),
+            horizontal: None,
+            vertical: None,
+        };
+        let mouse_factor = niri_config::input::ScrollFactor {
+            base: Some(niri_config::FloatOrInt(3.0)),
+            horizontal: None,
+            vertical: None,
+        };
+        let trackball_factor = niri_config::input::ScrollFactor {
+            base: Some(niri_config::FloatOrInt(4.0)),
+            horizontal: None,
+            vertical: None,
+        };
+        input.touchpad.scroll_factor = Some(touchpad_factor);
+        input.mouse.scroll_factor = Some(mouse_factor);
+        input.trackball.scroll_factor = Some(trackball_factor);
+
+        assert_eq!(
+            scroll_factor_for_axis_source(
+                &input,
+                AxisSource::Continuous,
+                Some(ScrollFactorDeviceKind::Mouse)
+            ),
+            Some(mouse_factor)
+        );
+        assert_eq!(
+            scroll_factor_for_axis_source(
+                &input,
+                AxisSource::Wheel,
+                Some(ScrollFactorDeviceKind::Touchpad)
+            ),
+            Some(touchpad_factor)
+        );
+        assert_eq!(
+            scroll_factor_for_axis_source(
+                &input,
+                AxisSource::Continuous,
+                Some(ScrollFactorDeviceKind::Trackball)
+            ),
+            Some(trackball_factor)
+        );
+        assert_eq!(
+            scroll_factor_for_axis_source(
+                &input,
+                AxisSource::Continuous,
+                Some(ScrollFactorDeviceKind::Trackpoint)
+            ),
+            None
+        );
+    }
 
     #[test]
     fn bindings_suppress_keys() {
@@ -5217,6 +5382,7 @@ mod tests {
                 mods,
                 &screenshot_ui,
                 disable_power_key_handling,
+                false,
                 is_inhibiting_shortcuts.get(),
             )
         };
@@ -5234,6 +5400,7 @@ mod tests {
                 mods,
                 &screenshot_ui,
                 disable_power_key_handling,
+                false,
                 is_inhibiting_shortcuts.get(),
             )
         };
@@ -5362,6 +5529,83 @@ mod tests {
         let filter = close_key_event(&mut suppressed_keys, mods, false);
         assert!(matches!(filter, FilterResult::Intercept(None)));
         assert!(suppressed_keys.is_empty());
+    }
+
+    #[test]
+    fn power_key_wake_press_is_suppressed_after_resume() {
+        let mut suppressed_keys = HashSet::new();
+        let screenshot_ui = ScreenshotUi::new(Clock::default(), Default::default());
+        let power_key = Keysym::XF86_PowerOff;
+        let key_code = Keycode::from(power_key.raw() + 8);
+        let no_mods = ModifiersState::default();
+
+        let filter = should_intercept_key(
+            &mut suppressed_keys,
+            [],
+            ModKey::Super,
+            key_code,
+            power_key,
+            Some(power_key),
+            true,
+            no_mods,
+            &screenshot_ui,
+            false,
+            true,
+            false,
+        );
+
+        assert!(matches!(filter, FilterResult::Intercept(None)));
+        assert!(suppressed_keys.contains(&key_code));
+
+        let filter = should_intercept_key(
+            &mut suppressed_keys,
+            [],
+            ModKey::Super,
+            key_code,
+            power_key,
+            Some(power_key),
+            false,
+            no_mods,
+            &screenshot_ui,
+            false,
+            false,
+            false,
+        );
+
+        assert!(matches!(filter, FilterResult::Intercept(None)));
+        assert!(suppressed_keys.is_empty());
+    }
+
+    #[test]
+    fn power_key_still_suspends_outside_resume_suppression() {
+        let mut suppressed_keys = HashSet::new();
+        let screenshot_ui = ScreenshotUi::new(Clock::default(), Default::default());
+        let power_key = Keysym::XF86_PowerOff;
+        let key_code = Keycode::from(power_key.raw() + 8);
+
+        let filter = should_intercept_key(
+            &mut suppressed_keys,
+            [],
+            ModKey::Super,
+            key_code,
+            power_key,
+            Some(power_key),
+            true,
+            ModifiersState::default(),
+            &screenshot_ui,
+            false,
+            false,
+            false,
+        );
+
+        assert!(matches!(
+            filter,
+            FilterResult::Intercept(Some(Bind {
+                action: Action::Suspend,
+                ..
+            }))
+        ));
+        assert!(suppressed_keys.contains(&key_code));
     }
 
     #[test]
