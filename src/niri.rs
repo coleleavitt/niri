@@ -6086,7 +6086,7 @@ impl Niri {
             return;
         }
 
-        if Some(surface) != self.keyboard_focus.surface() {
+        if Some(&self.find_root_shell_surface(surface)) != self.keyboard_focus.surface() {
             return;
         }
 
