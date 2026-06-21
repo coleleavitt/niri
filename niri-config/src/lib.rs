@@ -727,6 +727,7 @@ mod tests {
                     scroll-button-lock
                     left-handed
                     middle-emulation
+                    scroll-factor horizontal=0.5 vertical=1.25
                 }
 
                 tablet {
@@ -1110,6 +1111,21 @@ mod tests {
                     scroll_button_lock: true,
                     left_handed: true,
                     middle_emulation: true,
+                    scroll_factor: Some(
+                        ScrollFactor {
+                            base: None,
+                            horizontal: Some(
+                                FloatOrInt(
+                                    0.5,
+                                ),
+                            ),
+                            vertical: Some(
+                                FloatOrInt(
+                                    1.25,
+                                ),
+                            ),
+                        },
+                    ),
                 },
                 tablet: Tablet {
                     off: false,
