@@ -5,6 +5,17 @@ use zbus::{fdo, interface, zvariant};
 use super::Start;
 use crate::niri::NewClient;
 
+const PORTAL_BACKEND: u32 = 1;
+const FILE_CHOOSER_PORTAL_BACKEND: u32 = 2;
+const GLOBAL_SHORTCUTS_PORTAL_BACKEND: u32 = 3;
+
+fn is_supported_service_client_type(service_client_type: u32) -> bool {
+    matches!(
+        service_client_type,
+        PORTAL_BACKEND | FILE_CHOOSER_PORTAL_BACKEND | GLOBAL_SHORTCUTS_PORTAL_BACKEND
+    )
+}
+
 pub struct ServiceChannel {
     to_niri: calloop::channel::Sender<NewClient>,
 }
@@ -15,7 +26,7 @@ impl ServiceChannel {
         &mut self,
         service_client_type: u32,
     ) -> fdo::Result<zvariant::OwnedFd> {
-        if service_client_type != 1 {
+        if !is_supported_service_client_type(service_client_type) {
             return Err(fdo::Error::InvalidArgs(
                 "Invalid service client type".to_owned(),
             ));
@@ -50,5 +61,28 @@ impl Start for ServiceChannel {
             .serve_at("/org/gnome/Mutter/ServiceChannel", self)?
             .build()?;
         Ok(conn)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_mutter_service_client_types() {
+        assert!(is_supported_service_client_type(PORTAL_BACKEND));
+        assert!(is_supported_service_client_type(
+            FILE_CHOOSER_PORTAL_BACKEND
+        ));
+        assert!(is_supported_service_client_type(
+            GLOBAL_SHORTCUTS_PORTAL_BACKEND
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_service_client_types() {
+        assert!(!is_supported_service_client_type(0));
+        assert!(!is_supported_service_client_type(4));
+        assert!(!is_supported_service_client_type(u32::MAX));
     }
 }
