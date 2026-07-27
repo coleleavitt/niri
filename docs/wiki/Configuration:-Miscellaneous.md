@@ -24,6 +24,28 @@ cursor {
     hide-after-inactive-ms 1000
 }
 
+night-light {
+    latitude 42.3314
+    longitude -83.0458
+    temperature-day 6500
+    temperature-night 3500
+    brightness-night 0.9
+
+    adaptive {
+        on
+        sensor-path "$XDG_RUNTIME_DIR/niri-ambient-lux"
+        backlight-name "intel_backlight"
+        low-lux 2.0
+        high-lux 500.0
+        min-backlight 0.08
+        max-backlight 1.0
+        gamma-dim-below 0.2
+        gamma-min 0.7
+        smoothing 0.25
+        hysteresis 0.02
+    }
+}
+
 overview {
     zoom 0.5
     backdrop-color "#262626"
@@ -195,6 +217,92 @@ cursor {
     hide-after-inactive-ms 1000
 }
 ```
+
+### `night-light`
+
+Built-in night light can adjust output gamma from the sun position, using `latitude` and `longitude` to choose between the daytime and nighttime color temperatures.
+
+The optional `adaptive` block reads ambient light from a Linux IIO illuminance sensor, or from an explicit `sensor-path` file containing a lux value. It adjusts the laptop backlight first; when the target backlight is below `gamma-dim-below`, it also applies a small gamma brightness reduction down to `gamma-min`.
+
+Niri does not read camera frames inside the compositor. On systems without an IIO illuminance sensor, run `niri-camera-lux` as a separate helper and point `sensor-path` at its output file.
+
+```kdl
+night-light {
+    latitude 42.3314
+    longitude -83.0458
+    temperature-day 6500
+    temperature-night 3500
+    brightness-night 0.9
+
+    adaptive {
+        on
+        // Omit sensor-path to use the first detected IIO illuminance sensor.
+        sensor-path "/sys/bus/iio/devices/iio:device0/in_illuminance_input"
+
+        // Omit backlight-name to use the first detected backlight device.
+        backlight-name "intel_backlight"
+
+        low-lux 2.0
+        high-lux 500.0
+        min-backlight 0.08
+        max-backlight 1.0
+        gamma-dim-below 0.2
+        gamma-min 0.7
+        smoothing 0.25
+        hysteresis 0.02
+    }
+}
+```
+
+Backlight writes go to `/sys/class/backlight` when that file is writable. It usually isn't for a normal user session, so niri falls back to logind's `org.freedesktop.login1.Session.SetBrightness`, which is performed unprivileged for the active session. No udev rule is required.
+
+#### Matching the room's colour temperature
+
+By default the screen temperature follows the sun between `temperature-day` and `temperature-night`. If a sensor can report the room's actual colour temperature, point `temperature-path` at a file containing that value in kelvin and the screen will track the light you are sitting in instead: a warm bulb warms the screen, daylight leaves it neutral.
+
+With `temperature-path` set, `temperature-day` and `temperature-night` stop being the endpoints of a solar curve and become the bounds the measured value is clamped into. Set them to the warmest and coolest screen you are willing to accept.
+
+```kdl
+night-light {
+    // The screen will stay between these two, following the room.
+    temperature-night 2700
+    temperature-day 6500
+
+    adaptive {
+        on
+        sensor-path "$XDG_RUNTIME_DIR/niri-ambient-lux"
+        temperature-path "$XDG_RUNTIME_DIR/niri-ambient-temp"
+
+        // Ignore either sensor file once it stops being updated. 0 disables
+        // the check, for sensors that legitimately never change.
+        sensor-max-age-secs 300
+    }
+}
+```
+
+Readings outside 1000K-25000K are rejected as sampler noise. The value is smoothed by `smoothing`, so pointing a camera at a passing headlight will not flip the screen.
+
+`sensor-max-age-secs` matters more than it looks: an external sampler that dies leaves its last value on disk forever, which is otherwise indistinguishable from a live reading, and the screen would stay pinned to whatever the room looked like when the sampler stopped.
+
+#### Camera Lux Helper
+
+`niri-camera-lux` samples one GREY V4L2 frame per interval, maps average brightness to an approximate lux value, and writes it atomically to a file. The helper is intended for IR or grayscale camera nodes such as `/dev/video2`; use `v4l2-ctl --list-formats-ext -d /dev/video2` to confirm that the node supports `GREY`.
+
+```kdl
+spawn-sh-at-startup "niri-camera-lux --device /dev/video2 --output $XDG_RUNTIME_DIR/niri-ambient-lux"
+
+night-light {
+    adaptive {
+        on
+        sensor-path "$XDG_RUNTIME_DIR/niri-ambient-lux"
+        backlight-name "intel_backlight"
+    }
+}
+```
+
+`sensor-path` and `backlight-path` expand a leading `$XDG_RUNTIME_DIR` or `${XDG_RUNTIME_DIR}`.
+
+If the camera is too sensitive or too dim, tune `niri-camera-lux --max-lux`. This value is the approximate lux reported for a pure-white frame.
 
 ### `overview`
 

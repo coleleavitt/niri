@@ -1,0 +1,111 @@
+#!/bin/sh
+set -eu
+
+device=/dev/video2
+output=${XDG_RUNTIME_DIR:-/tmp}/niri-ambient-lux
+interval=60
+max_lux=500
+width=640
+height=360
+once=0
+
+usage() {
+    printf '%s\n' "usage: niri-camera-lux [--device PATH] [--output PATH] [--interval SECONDS] [--max-lux LUX] [--width PX] [--height PX] [--once]"
+}
+
+value_arg() {
+    if [ "$#" -lt 2 ]; then
+        usage >&2
+        exit 2
+    fi
+    printf '%s\n' "$2"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --device)
+            device=$(value_arg "$@")
+            shift 2
+            ;;
+        --output)
+            output=$(value_arg "$@")
+            shift 2
+            ;;
+        --interval)
+            interval=$(value_arg "$@")
+            shift 2
+            ;;
+        --max-lux)
+            max_lux=$(value_arg "$@")
+            shift 2
+            ;;
+        --width)
+            width=$(value_arg "$@")
+            shift 2
+            ;;
+        --height)
+            height=$(value_arg "$@")
+            shift 2
+            ;;
+        --once)
+            once=1
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+command -v v4l2-ctl >/dev/null
+command -v od >/dev/null
+command -v awk >/dev/null
+
+workdir=${TMPDIR:-/tmp}/niri-camera-lux.$$
+mkdir -p "$workdir"
+trap 'rm -rf "$workdir"' EXIT HUP INT TERM
+
+sample_once() {
+    frame=$workdir/frame.raw
+    v4l2-ctl --silent -d "$device" \
+        --set-fmt-video=width="$width",height="$height",pixelformat=GREY \
+        --stream-mmap \
+        --stream-count=1 \
+        --stream-to="$frame" >/dev/null
+
+    lux=$(
+        od -An -tu1 -v "$frame" |
+            awk -v max_lux="$max_lux" '
+                {
+                    for (i = 1; i <= NF; i += 1) {
+                        sum += $i
+                        count += 1
+                    }
+                }
+                END {
+                    if (count == 0) {
+                        exit 1
+                    }
+                    printf "%.3f\n", (sum / count / 255.0) * max_lux
+                }
+            '
+    )
+
+    mkdir -p "$(dirname "$output")"
+    tmp=$workdir/lux
+    printf '%s\n' "$lux" > "$tmp"
+    mv "$tmp" "$output"
+}
+
+while :; do
+    sample_once
+    if [ "$once" -eq 1 ]; then
+        exit 0
+    fi
+    sleep "$interval"
+done

@@ -1812,18 +1812,42 @@ impl State {
     /// Computes the current solar elevation, derives color temperature,
     /// and applies gamma ramps to all outputs.
     pub fn night_light_tick(&mut self) {
-        let Some(night_light) = &mut self.niri.night_light else {
+        let (ambient_lux, ambient_temperature) = self
+            .niri
+            .night_light
+            .as_ref()
+            .map(|night_light| {
+                (
+                    night_light.read_ambient_lux(),
+                    night_light.read_ambient_temperature(),
+                )
+            })
+            .unwrap_or((None, None));
+
+        let Some(update) = ({
+            let Some(night_light) = &mut self.niri.night_light else {
+                return;
+            };
+
+            night_light.tick(ambient_lux, ambient_temperature)
+        }) else {
             return;
         };
 
-        let Some((temp, brightness)) = night_light.tick() else {
-            return;
-        };
+        if let Some(backlight) = update.backlight {
+            if let Some(night_light) = &mut self.niri.night_light {
+                if let Err(err) = night_light.set_backlight_ratio(backlight) {
+                    warn!("night-light: failed to set adaptive backlight: {err}");
+                }
+            }
+        }
 
-        if !night_light.should_apply() {
+        if !update.gamma_changed {
             return;
         }
 
+        let temp = update.temperature;
+        let brightness = update.brightness;
         trace!("night-light: applying temperature {temp}K, brightness {brightness:.2}");
 
         // Apply gamma to all outputs.

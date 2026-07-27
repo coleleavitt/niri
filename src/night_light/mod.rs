@@ -1,8 +1,15 @@
+pub mod adaptive;
+pub mod backlight;
 pub mod gamma;
 pub mod solar;
+pub mod sysfs;
 
+use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use adaptive::AdaptiveController;
+use backlight::Backlight;
+use niri_config::night_light::AdaptiveNightLight;
 use niri_config::NightLight as NightLightConfig;
 
 /// Night light state and logic.
@@ -11,12 +18,16 @@ use niri_config::NightLight as NightLightConfig;
 /// and handles smooth transitions between day/night temperatures.
 pub struct NightLight {
     /// Configuration
-    latitude: f64,
-    longitude: f64,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
     temp_day: u32,
     temp_night: u32,
     transition_duration_mins: u32,
     brightness_night: f64,
+    adaptive_config: AdaptiveNightLight,
+    adaptive: AdaptiveController,
+    /// Resolved backlight output, created on first use.
+    backlight: Option<Backlight>,
 
     /// Current interpolated temperature
     current_temp: u32,
@@ -28,24 +39,30 @@ pub struct NightLight {
     enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NightLightUpdate {
+    pub temperature: u32,
+    pub brightness: f64,
+    pub gamma_changed: bool,
+    pub backlight: Option<f64>,
+}
+
 impl NightLight {
-    /// Create from config. Returns None if night-light section is disabled or
-    /// lat/lon not provided.
     pub fn new(config: &NightLightConfig) -> Option<Self> {
-        if config.off {
+        if !config_enabled(config) {
             return None;
         }
 
-        let latitude = config.latitude?;
-        let longitude = config.longitude?;
-
         Some(Self {
-            latitude,
-            longitude,
+            latitude: config.latitude,
+            longitude: config.longitude,
             temp_day: config.temperature_day,
             temp_night: config.temperature_night,
             transition_duration_mins: config.transition_duration,
             brightness_night: config.brightness_night,
+            adaptive_config: config.adaptive.clone(),
+            adaptive: AdaptiveController::default(),
+            backlight: None,
             current_temp: config.temperature_day,
             current_brightness: 1.0,
             external_gamma_active: false,
@@ -53,33 +70,59 @@ impl NightLight {
         })
     }
 
-    /// Called periodically (every ~60 seconds) to update the color temperature.
-    /// Returns Some((temperature, brightness)) if the gamma should be updated,
-    /// None if no change needed.
-    pub fn tick(&mut self) -> Option<(u32, f64)> {
-        if !self.enabled || self.external_gamma_active {
+    pub fn tick(
+        &mut self,
+        ambient_lux: Option<f64>,
+        ambient_temperature: Option<f64>,
+    ) -> Option<NightLightUpdate> {
+        if !self.enabled {
             return None;
         }
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
+        let adaptive = self
+            .adaptive
+            .tick(&self.adaptive_config, ambient_lux, ambient_temperature);
+        let (solar_temp, solar_brightness) =
+            if let (Some(latitude), Some(longitude)) = (self.latitude, self.longitude) {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64();
 
-        let elevation = solar::solar_elevation(now, self.latitude, self.longitude);
-        let target_temp = self.elevation_to_temperature(elevation);
-        let target_brightness = self.elevation_to_brightness(elevation);
+                let elevation = solar::solar_elevation(now, latitude, longitude);
+                (
+                    self.elevation_to_temperature(elevation),
+                    self.elevation_to_brightness(elevation),
+                )
+            } else {
+                (self.temp_day, 1.0)
+            };
 
-        // Only return Some if values changed
-        if target_temp != self.current_temp
-            || (target_brightness - self.current_brightness).abs() > 0.001
-        {
+        // A measured room temperature wins over the sun: the point is to match
+        // the light you are actually sitting in. temperature-day/night become
+        // the bounds of what the screen will do rather than the endpoints of a
+        // solar curve.
+        let target_temp = match adaptive.ambient_temperature {
+            Some(kelvin) => self.clamp_temperature(kelvin),
+            None => solar_temp,
+        };
+        let target_brightness = (solar_brightness * adaptive.gamma_brightness).clamp(0.0, 1.0);
+
+        let gamma_changed = !self.external_gamma_active
+            && (target_temp != self.current_temp
+                || (target_brightness - self.current_brightness).abs() > 0.001);
+
+        if gamma_changed {
             self.current_temp = target_temp;
             self.current_brightness = target_brightness;
-            Some((target_temp, target_brightness))
-        } else {
-            None
         }
+
+        (gamma_changed || adaptive.backlight.is_some()).then_some(NightLightUpdate {
+            temperature: target_temp,
+            brightness: target_brightness,
+            gamma_changed,
+            backlight: adaptive.backlight,
+        })
     }
 
     /// Notify that an external wlr-gamma-control client connected for an output.
@@ -104,19 +147,70 @@ impl NightLight {
 
     /// Update from config (e.g. on config reload).
     pub fn update_config(&mut self, config: &NightLightConfig) {
-        self.enabled = !config.off;
-
-        if let Some(lat) = config.latitude {
-            self.latitude = lat;
-        }
-        if let Some(lon) = config.longitude {
-            self.longitude = lon;
-        }
+        self.enabled = config_enabled(config);
+        self.latitude = config.latitude;
+        self.longitude = config.longitude;
 
         self.temp_day = config.temperature_day;
         self.temp_night = config.temperature_night;
         self.transition_duration_mins = config.transition_duration;
         self.brightness_night = config.brightness_night;
+        if self.adaptive_config != config.adaptive {
+            // Device selection may have changed; re-resolve on next use.
+            self.backlight = None;
+        }
+        self.adaptive_config = config.adaptive.clone();
+    }
+
+    pub fn read_ambient_lux(&self) -> Option<f64> {
+        if !self.enabled || !self.adaptive_config.on {
+            return None;
+        }
+
+        sysfs::read_ambient_lux(&self.adaptive_config)
+    }
+
+    /// Reads the room's measured colour temperature, if a sensor supplies one.
+    pub fn read_ambient_temperature(&self) -> Option<f64> {
+        if !self.enabled || !self.adaptive_config.on {
+            return None;
+        }
+
+        sysfs::read_ambient_temperature(&self.adaptive_config)
+    }
+
+    /// Restricts a measured room temperature to the configured screen range.
+    fn clamp_temperature(&self, kelvin: f64) -> u32 {
+        let low = self.temp_night.min(self.temp_day);
+        let high = self.temp_night.max(self.temp_day);
+        (kelvin.round() as i64).clamp(low as i64, high as i64) as u32
+    }
+
+    /// Applies a backlight ratio, resolving the device on first use.
+    ///
+    /// The device handle is cached so the sysfs-denied -> logind fallback is
+    /// decided once rather than re-probed on every tick.
+    pub fn set_backlight_ratio(&mut self, ratio: f64) -> io::Result<()> {
+        if self.backlight.is_none() {
+            match Backlight::new(&self.adaptive_config) {
+                Ok(backlight) => self.backlight = Some(backlight),
+                Err(err) => {
+                    self.adaptive.invalidate_backlight();
+                    return Err(err);
+                }
+            }
+        }
+
+        let result = self.backlight.as_mut().unwrap().set_ratio(ratio);
+        if result.is_err() {
+            // The controller recorded this ratio as applied before we tried it,
+            // so clear it or hysteresis suppresses every future attempt and the
+            // backlight stays wherever it was after one transient failure.
+            self.adaptive.invalidate_backlight();
+            self.backlight = None;
+        }
+
+        result
     }
 
     /// Map solar elevation to color temperature.
@@ -163,6 +257,10 @@ impl NightLight {
     }
 }
 
+fn config_enabled(config: &NightLightConfig) -> bool {
+    !config.off && (config.adaptive.on || (config.latitude.is_some() && config.longitude.is_some()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,12 +268,15 @@ mod tests {
     /// Helper to create a NightLight with typical defaults for testing.
     fn test_night_light() -> NightLight {
         NightLight {
-            latitude: 45.0,
-            longitude: -93.0,
+            latitude: Some(45.0),
+            longitude: Some(-93.0),
             temp_day: 6500,
             temp_night: 4000,
             transition_duration_mins: 30,
             brightness_night: 0.8,
+            adaptive_config: AdaptiveNightLight::default(),
+            adaptive: AdaptiveController::default(),
+            backlight: None,
             current_temp: 6500,
             current_brightness: 1.0,
             external_gamma_active: false,
@@ -233,13 +334,100 @@ mod tests {
     fn tick_returns_none_when_disabled() {
         let mut nl = test_night_light();
         nl.enabled = false;
-        assert!(nl.tick().is_none());
+        assert!(nl.tick(None, None).is_none());
     }
 
     #[test]
     fn tick_returns_none_when_external_gamma() {
         let mut nl = test_night_light();
         nl.set_external_gamma_active(true);
-        assert!(nl.tick().is_none());
+        assert!(nl.tick(None, None).is_none());
+    }
+
+    #[test]
+    fn adaptive_night_light_can_start_without_coordinates() {
+        let config = NightLightConfig {
+            adaptive: AdaptiveNightLight {
+                on: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(NightLight::new(&config).is_some());
+    }
+
+    #[test]
+    fn measured_room_temperature_drives_the_screen_within_configured_bounds() {
+        let config = NightLightConfig {
+            temperature_day: 6500,
+            temperature_night: 2700,
+            adaptive: AdaptiveNightLight {
+                on: true,
+                smoothing: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut nl = NightLight::new(&config).unwrap();
+
+        // A daylit room pulls the screen neutral...
+        let update = nl.tick(Some(200.0), Some(6400.0)).unwrap();
+        assert_eq!(update.temperature, 6400);
+
+        // ...a warm bulb pulls it warm.
+        let update = nl.tick(Some(200.0), Some(2900.0)).unwrap();
+        assert_eq!(update.temperature, 2900);
+
+        // Readings outside the configured range are clamped, not obeyed:
+        // a camera pointed at a blue screen should not blow past the bounds.
+        let update = nl.tick(Some(200.0), Some(9000.0)).unwrap();
+        assert_eq!(update.temperature, 6500);
+        let update = nl.tick(Some(200.0), Some(1200.0)).unwrap();
+        assert_eq!(update.temperature, 2700);
+    }
+
+    #[test]
+    fn without_a_temperature_sensor_the_sun_still_decides() {
+        let config = NightLightConfig {
+            temperature_day: 6500,
+            temperature_night: 2700,
+            adaptive: AdaptiveNightLight {
+                on: true,
+                smoothing: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut nl = NightLight::new(&config).unwrap();
+
+        // No coordinates and no sensor: temperature-day is the constant.
+        let update = nl.tick(Some(200.0), None).unwrap();
+        assert_eq!(update.temperature, 6500);
+    }
+
+    #[test]
+    fn adaptive_tick_updates_backlight_while_external_gamma_is_active() {
+        let mut nl = NightLight::new(&NightLightConfig {
+            adaptive: AdaptiveNightLight {
+                on: true,
+                smoothing: 1.0,
+                low_lux: 2.0,
+                high_lux: 500.0,
+                min_backlight: 0.1,
+                max_backlight: 1.0,
+                gamma_min: 0.6,
+                gamma_dim_below: 0.25,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        nl.set_external_gamma_active(true);
+
+        let update = nl.tick(Some(0.5), None).unwrap();
+
+        assert_eq!(update.backlight, Some(0.1));
+        assert!(!update.gamma_changed);
     }
 }

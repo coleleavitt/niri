@@ -166,6 +166,7 @@ similar.opt-level = 3
 version = "26.04"
 assets = [
     { source = "target/release/niri", dest = "/usr/bin/", mode = "755" },
+    { source = "resources/niri-camera-lux", dest = "/usr/bin/", mode = "755" },
     { source = "resources/niri-session", dest = "/usr/bin/", mode = "755" },
     { source = "resources/niri.desktop", dest = "/usr/share/wayland-sessions/", mode = "644" },
     { source = "resources/niri-portals.conf", dest = "/usr/share/xdg-desktop-portal/", mode = "644" },
@@ -180,6 +181,7 @@ fuzzel = "*"
 depends = "alacritty, fuzzel"
 assets = [
     ["target/release/niri", "usr/bin/", "755"],
+    ["resources/niri-camera-lux", "usr/bin/", "755"],
     ["resources/niri-session", "usr/bin/", "755"],
     ["resources/niri.desktop", "/usr/share/wayland-sessions/", "644"],
     ["resources/niri-portals.conf", "/usr/share/xdg-desktop-portal/", "644"],

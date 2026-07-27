@@ -122,6 +122,7 @@
 
               install -Dm644 resources/niri.desktop -t $out/share/wayland-sessions
               install -Dm644 resources/niri-portals.conf -t $out/share/xdg-desktop-portal
+              install -Dm755 resources/niri-camera-lux -t $out/bin
             ''
             + lib.optionalString withSystemd ''
               install -Dm755 resources/niri-session $out/bin/niri-session

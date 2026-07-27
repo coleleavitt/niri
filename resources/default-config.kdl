@@ -106,6 +106,41 @@ input {
     position x=1280 y=0
 }
 
+// Built-in night light can adjust color temperature from the sun position.
+// The adaptive block can also read an ambient light sensor and adjust the laptop backlight.
+// Adaptive ambient light uses Linux IIO sensors or an explicit sensor-path file.
+// Systems without an IIO sensor can run niri-camera-lux to sample a GREY V4L2 camera into a lux file.
+// spawn-sh-at-startup "niri-camera-lux --device /dev/video2 --output $XDG_RUNTIME_DIR/niri-ambient-lux"
+/-night-light {
+    // latitude 42.3314
+    // longitude -83.0458
+    // temperature-day 6500
+    // temperature-night 3500
+    // brightness-night 0.9
+
+    adaptive {
+        on
+        // sensor-path "$XDG_RUNTIME_DIR/niri-ambient-lux"
+        //
+        // Track the room's measured colour temperature (kelvin) instead of the
+        // sun. temperature-day/temperature-night then act as the bounds.
+        // temperature-path "$XDG_RUNTIME_DIR/niri-ambient-temp"
+        //
+        // Ignore a sensor file once it goes stale; 0 disables the check.
+        // sensor-max-age-secs 300
+        // sensor-path "/sys/bus/iio/devices/iio:device0/in_illuminance_input"
+        // backlight-name "intel_backlight"
+        low-lux 2.0
+        high-lux 500.0
+        min-backlight 0.08
+        max-backlight 1.0
+        gamma-dim-below 0.2
+        gamma-min 0.7
+        smoothing 0.25
+        hysteresis 0.02
+    }
+}
+
 // Settings that influence how windows are positioned and sized.
 // Find more information on the wiki:
 // https://niri-wm.github.io/niri/Configuration:-Layout
