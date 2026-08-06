@@ -1,0 +1,542 @@
+# Instincts generated from https://github.com/coleleavitt/niri
+# Generated: 2026-07-17T19:29:21.938Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: niri-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/niri
+---
+
+# Niri Commit Length
+
+## Action
+
+Keep commit messages concise (~43 characters)
+
+## Evidence
+
+- Average commit message length: 43 chars
+- Based on 33 commits
+
+---
+id: niri-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/niri
+---
+
+# Niri Naming Files
+
+## Action
+
+Use camelCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: camelCase
+
+---
+id: niri-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/niri
+---
+
+# Niri Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: niri-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/niri
+---
+
+# Niri Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: niri-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/niri
+---
+
+# Niri Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: niri-workflow-feature-development
+trigger: "when implementing a new feature"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/niri
+---
+
+# Niri Workflow Feature Development
+
+## Action
+
+Follow the feature-development workflow:
+1. Add feature implementation
+2. Add tests for feature
+3. Update documentation
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~7x per month
+- Files: 
+
+---
+id: niri-workflow-feature-implementation-with-config-and-docs
+trigger: "when doing feature implementation with config and docs"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/niri
+---
+
+# Niri Workflow Feature Implementation With Config And Docs
+
+## Action
+
+Follow the feature-implementation-with-config-and-docs workflow:
+1. Add or update configuration code in niri-config/src/*.rs
+2. Update or add implementation in src/**/*.rs
+3. Update documentation in docs/wiki/*.md
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: niri-config/src/*.rs, src/**/*.rs, docs/wiki/*.md
+
+---
+id: niri-workflow-input-feature-or-bugfix
+trigger: "when doing input feature or bugfix"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/niri
+---
+
+# Niri Workflow Input Feature Or Bugfix
+
+## Action
+
+Follow the input-feature-or-bugfix workflow:
+1. Modify src/input/mod.rs to implement or fix input logic
+2. Optionally update related configuration in niri-config/src/*.rs
+3. Optionally update UI overlays in src/ui/*.rs
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: src/input/mod.rs, niri-config/src/*.rs, src/ui/*.rs
+
+---
+id: niri-workflow-documentation-update
+trigger: "when doing documentation update"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/niri
+---
+
+# Niri Workflow Documentation Update
+
+## Action
+
+Follow the documentation-update workflow:
+1. Edit or add relevant docs/wiki/*.md files
+2. Optionally update README.md
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: docs/wiki/*.md, README.md
+
+---
+id: niri-workflow-nix-or-flake-configuration-update
+trigger: "when doing nix or flake configuration update"
+confidence: 0.55
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/niri
+---
+
+# Niri Workflow Nix Or Flake Configuration Update
+
+## Action
+
+Follow the nix-or-flake-configuration-update workflow:
+1. Edit flake.nix and/or flake.lock
+2. Optionally update related build scripts
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~1x per month
+- Files: flake.nix, flake.lock
+
+---
+id: niri-workflow-dependency-upgrade
+trigger: "when doing dependency upgrade"
+confidence: 0.55
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/coleleavitt/niri
+---
+
+# Niri Workflow Dependency Upgrade
+
+## Action
+
+Follow the dependency-upgrade workflow:
+1. Update Cargo.toml and Cargo.lock
+2. Modify src/**/*.rs to accommodate API changes or new features
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~1x per month
+- Files: Cargo.toml, Cargo.lock, src/**/*.rs
+
+---
+id: niri-instinct-file-naming
+trigger: "When creating or renaming source files"
+confidence: 0.85
+domain: code-style
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct File Naming
+
+## Action
+
+Use camelCase for file names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.files
+- Seen in src/backend/headless.rs, src/input/mod.rs
+
+---
+id: niri-instinct-function-naming
+trigger: "When defining a function"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct Function Naming
+
+## Action
+
+Use camelCase for function names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.functions
+- Seen in src/input/mod.rs
+
+---
+id: niri-instinct-class-naming
+trigger: "When defining a struct or class"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct Class Naming
+
+## Action
+
+Use PascalCase for class/struct names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.classes
+
+---
+id: niri-instinct-constant-naming
+trigger: "When defining a constant"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct Constant Naming
+
+## Action
+
+Use SCREAMING_SNAKE_CASE for constant names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.constants
+
+---
+id: niri-instinct-import-style
+trigger: "When importing modules in Rust code"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- Pattern in codeStyle.importStyle
+
+---
+id: niri-instinct-export-style
+trigger: "When exporting items from a module"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in codeStyle.exportStyle
+
+---
+id: niri-instinct-test-location
+trigger: "When adding or updating tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct Test Location
+
+## Action
+
+Place tests in a separate location from src/ (not inline with implementation code)
+
+## Evidence
+
+- Pattern in architecture.testLocation
+
+---
+id: niri-instinct-test-feature
+trigger: "When implementing a new feature"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct Test Feature
+
+## Action
+
+Add or update tests for the feature after implementation
+
+## Evidence
+
+- Seen in workflow.feature-development.commitSequence
+- Example: Add tests for feature
+
+---
+id: niri-instinct-commit-prefix
+trigger: "When writing a commit message"
+confidence: 0.95
+domain: git
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct Commit Prefix
+
+## Action
+
+Start the commit message with a prefix indicating the area (e.g., fix, feat, input, render, layout, nix, wiki, pw_utils)
+
+## Evidence
+
+- Pattern in commits.prefixes
+- Seen in commit: 'render: fix blur on OpenGL ES 2.0 GPUs'
+- Seen in commit: 'fix: link to hyprland scrolling layout docs'
+
+---
+id: niri-instinct-commit-length
+trigger: "When writing a commit message"
+confidence: 0.7
+domain: git
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct Commit Length
+
+## Action
+
+Keep the commit message concise, around 43 characters on average
+
+## Evidence
+
+- Pattern in commits.averageLength
+
+---
+id: niri-instinct-feature-implementation-with-config-and-docs
+trigger: "When someone wants to add a new user-facing feature that is configurable"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct Feature Implementation With Config And Docs
+
+## Action
+
+Add or update configuration code in niri-config/src/*.rs, update or add implementation in src/**/*.rs, and update documentation in docs/wiki/*.md
+
+## Evidence
+
+- Workflow: feature-implementation-with-config-and-docs
+- Example commits and files: niri-config/src/lib.rs, src/backend/headless.rs, docs/wiki/Configuration:-Outputs.md
+
+---
+id: niri-instinct-input-feature-or-bugfix
+trigger: "When someone wants to add or fix input device support or behavior"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct Input Feature Or Bugfix
+
+## Action
+
+Modify src/input/mod.rs to implement or fix input logic, optionally update related configuration in niri-config/src/*.rs, and optionally update UI overlays in src/ui/*.rs
+
+## Evidence
+
+- Workflow: input-feature-or-bugfix
+- Example files: src/input/mod.rs, niri-config/src/*.rs, src/ui/*.rs
+
+---
+id: niri-instinct-documentation-update
+trigger: "When someone wants to clarify, add, or fix documentation"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct Documentation Update
+
+## Action
+
+Edit or add relevant docs/wiki/*.md files and optionally update README.md
+
+## Evidence
+
+- Workflow: documentation-update
+- Example files: docs/wiki/*.md, README.md
+
+---
+id: niri-instinct-nix-or-flake-configuration-update
+trigger: "When someone wants to change build inputs, update dependencies, or adjust build environment"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct Nix Or Flake Configuration Update
+
+## Action
+
+Edit flake.nix and/or flake.lock, optionally update related build scripts
+
+## Evidence
+
+- Workflow: nix-or-flake-configuration-update
+- Example files: flake.nix, flake.lock
+
+---
+id: niri-instinct-dependency-upgrade
+trigger: "When someone wants to update a third-party crate to a newer version"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: coleleavitt/niri
+---
+
+# Niri Instinct Dependency Upgrade
+
+## Action
+
+Update Cargo.toml and Cargo.lock, modify src/**/*.rs to accommodate API changes or new features
+
+## Evidence
+
+- Workflow: dependency-upgrade
+- Example files: Cargo.toml, Cargo.lock, src/**/*.rs
+
