@@ -278,7 +278,7 @@ impl NightLight {
     fn day_fraction(&self, elevation: f64) -> f64 {
         let low = self.elevation_night.min(self.elevation_day);
         let high = self.elevation_day.max(self.elevation_night);
-        if high - low < f64::EPSILON {
+        if (high - low).abs() < f64::EPSILON {
             return if elevation >= high { 1.0 } else { 0.0 };
         }
         ((elevation - low) / (high - low)).clamp(0.0, 1.0)
