@@ -10,6 +10,15 @@
 ///
 /// Uses the Tanner Helland approximation algorithm.
 pub fn temperature_to_rgb(temp: u32) -> (f64, f64, f64) {
+    // The raw approximation is not exactly white at 6500K (blue comes out around 0.98), so
+    // "night-light off" would still leave a faint tint. Normalise per channel against 6500K so
+    // the daytime default is a true identity ramp, like redshift's whitepoint table.
+    let (r0, g0, b0) = temperature_to_rgb_raw(6500);
+    let (r, g, b) = temperature_to_rgb_raw(temp);
+    ((r / r0).min(1.0), (g / g0).min(1.0), (b / b0).min(1.0))
+}
+
+fn temperature_to_rgb_raw(temp: u32) -> (f64, f64, f64) {
     let temp_hundreds = temp as f64 / 100.0;
 
     if temp_hundreds <= 66.0 {
@@ -93,19 +102,19 @@ mod tests {
     #[test]
     fn test_6500k_is_neutral() {
         let (r, g, b) = temperature_to_rgb(6500);
-        // At 6500K (daylight), all channels should be approximately 1.0.
-        assert!(
-            (r - 1.0).abs() < 0.02,
-            "red at 6500K should be ~1.0, got {r}"
-        );
-        assert!(
-            (g - 1.0).abs() < 0.02,
-            "green at 6500K should be ~1.0, got {g}"
-        );
-        assert!(
-            (b - 1.0).abs() < 0.02,
-            "blue at 6500K should be ~1.0, got {b}"
-        );
+        // At 6500K (daylight) the ramp must be an exact identity: this is what "off" looks like.
+        assert_eq!((r, g, b), (1.0, 1.0, 1.0));
+
+        // The raw approximation is what needed correcting.
+        let (_, _, b_raw) = temperature_to_rgb_raw(6500);
+        assert!(b_raw < 0.99, "raw blue at 6500K is {b_raw}");
+    }
+
+    #[test]
+    fn warmer_than_6500k_only_drops_blue_and_green() {
+        let (r, g, b) = temperature_to_rgb(4000);
+        assert_eq!(r, 1.0);
+        assert!(g < 1.0 && b < g);
     }
 
     #[test]

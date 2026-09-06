@@ -265,6 +265,8 @@ By default the screen temperature follows the sun between `temperature-day` and 
 
 With `temperature-path` set, `temperature-day` and `temperature-night` stop being the endpoints of a solar curve and become the bounds the measured value is clamped into. Set them to the warmest and coolest screen you are willing to accept.
 
+If `latitude` and `longitude` are also set, the solar curve acts as a ceiling: the screen is never cooler than the schedule says, but a warm lamp can still pull it warmer. So at night the screen goes warm even under a daylight-coloured bulb, and during the day it follows the room.
+
 ```kdl
 night-light {
     // The screen will stay between these two, following the room.

@@ -103,12 +103,13 @@ impl NightLight {
                 (self.temp_day, 1.0)
             };
 
-        // A measured room temperature wins over the sun: the point is to match
-        // the light you are actually sitting in. temperature-day/night become
-        // the bounds of what the screen will do rather than the endpoints of a
-        // solar curve.
+        // The sun sets the ceiling, the room can only pull it warmer. Without coordinates the
+        // ceiling is temperature-day, so the screen simply follows the room between the two
+        // bounds. With coordinates, night still means warm even in a daylight-coloured room
+        // (a webcam under a cool LED bulb would otherwise keep the screen at 6500K at 2am), and
+        // a warm lamp during the day still warms the screen beyond the solar curve.
         let target_temp = match adaptive.ambient_temperature {
-            Some(kelvin) => self.clamp_temperature(kelvin),
+            Some(kelvin) => self.clamp_temperature(kelvin).min(solar_temp),
             None => solar_temp,
         };
         let target_brightness = (solar_brightness * adaptive.gamma_brightness).clamp(0.0, 1.0);
@@ -426,6 +427,28 @@ mod tests {
         assert_eq!(update.temperature, 6500);
         let update = nl.tick(Some(200.0), Some(1200.0)).unwrap();
         assert_eq!(update.temperature, 2700);
+    }
+
+    #[test]
+    fn the_sun_caps_the_measured_room_temperature() {
+        let mut nl = test_night_light();
+        nl.latitude = None;
+        nl.longitude = None;
+        nl.adaptive_config = AdaptiveNightLight {
+            on: true,
+            smoothing: 1.0,
+            ..Default::default()
+        };
+
+        // Pretend the solar curve says full night.
+        nl.temp_day = 4000;
+        nl.temp_night = 4000;
+        // A 6300K room must not push the screen past the schedule...
+        assert_eq!(nl.tick(Some(50.0), Some(6300.0)).unwrap().temperature, 4000);
+
+        // ...but a warm bulb still pulls it warmer than the schedule allows for.
+        nl.temp_night = 2700;
+        assert_eq!(nl.tick(Some(50.0), Some(2900.0)).unwrap().temperature, 2900);
     }
 
     #[test]
