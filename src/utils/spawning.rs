@@ -315,7 +315,7 @@ mod systemd {
                                 closefrom(raw + 1);
                             }
 
-                            let _ = read_all(pipe, &mut [0]);
+                            wait_for_parent(pipe, grandchild_pid);
                         }
 
                         libc::_exit(0)
@@ -338,6 +338,12 @@ mod systemd {
 
         drop(pipe_pid_write);
         drop(pipe_wait_read);
+
+        // Tell the intermediate child that exec() succeeded, so from now on it must stay alive
+        // until we're done with the systemd scope even if the grandchild exits quickly.
+        if let Some(pipe) = &pipe_wait_write {
+            let _ = write_all(pipe, &[EXEC_OK]);
+        }
 
         // Wait for the grandchild PID.
         if let Some(pipe) = pipe_pid_read {
@@ -364,6 +370,81 @@ mod systemd {
         drop(pipe_wait_write);
 
         Some(child)
+    }
+
+    /// Byte the parent writes to the wait pipe once `Command::spawn()` has returned successfully.
+    const EXEC_OK: u8 = 1;
+
+    /// Blocks the intermediate child until the parent is done with it.
+    ///
+    /// The parent holds the write end of `pipe` across `Command::spawn()`. If the grandchild
+    /// fails to exec (e.g. the binary is missing), Rust's `spawn()` calls `wait()` on *us*
+    /// before returning the error to the parent, while we would be sitting here waiting for the
+    /// parent to drop the pipe: a deadlock that leaks a thread and a zombie per failed spawn, and
+    /// swallows the error message entirely.
+    ///
+    /// So until the parent confirms that exec succeeded ([`EXEC_OK`]), we also watch the
+    /// grandchild through a pidfd and exit as soon as it dies. After the confirmation we ignore
+    /// the grandchild and wait for the pipe to close, which is what keeps the systemd scope
+    /// non-empty for short-lived commands.
+    fn wait_for_parent(pipe: OwnedFd, grandchild_pid: libc::pid_t) {
+        #[cfg(target_os = "linux")]
+        {
+            let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, grandchild_pid, 0) };
+            if pidfd >= 0 {
+                let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd as _) };
+                let mut exec_confirmed = false;
+
+                loop {
+                    let mut fds = [
+                        libc::pollfd {
+                            fd: pipe.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        },
+                        libc::pollfd {
+                            fd: pidfd.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        },
+                    ];
+                    let nfds = if exec_confirmed { 1 } else { 2 };
+
+                    let rc = unsafe { libc::poll(fds.as_mut_ptr(), nfds, -1) };
+                    if rc < 0 {
+                        if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                            continue;
+                        }
+                        return;
+                    }
+
+                    if fds[0].revents != 0 {
+                        let mut byte = [0u8; 1];
+                        match retry_on_intr(|| read(&pipe, &mut byte)) {
+                            Ok(1) if byte[0] == EXEC_OK => exec_confirmed = true,
+                            // EOF or error: the parent is done with us.
+                            _ => return,
+                        }
+                    }
+
+                    if !exec_confirmed && fds[1].revents != 0 {
+                        // The grandchild died before exec() was confirmed: most likely exec
+                        // failed, and the parent is blocked in wait() for us. Let it go.
+                        return;
+                    }
+                }
+            }
+        }
+
+        // No pidfd support: fall back to plain blocking. Consume the EXEC_OK byte (if any) and
+        // then wait for EOF.
+        let mut byte = [0u8; 1];
+        loop {
+            match retry_on_intr(|| read(&pipe, &mut byte)) {
+                Ok(1) => continue,
+                _ => return,
+            }
+        }
     }
 
     fn write_all(fd: impl AsFd, buf: &[u8]) -> rustix::io::Result<()> {
