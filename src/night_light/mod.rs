@@ -22,7 +22,8 @@ pub struct NightLight {
     longitude: Option<f64>,
     temp_day: u32,
     temp_night: u32,
-    transition_duration_mins: u32,
+    elevation_day: f64,
+    elevation_night: f64,
     brightness_night: f64,
     adaptive_config: AdaptiveNightLight,
     adaptive: AdaptiveController,
@@ -62,7 +63,8 @@ impl NightLight {
             longitude: config.longitude,
             temp_day: config.temperature_day,
             temp_night: config.temperature_night,
-            transition_duration_mins: config.transition_duration,
+            elevation_day: config.elevation_day,
+            elevation_night: config.elevation_night,
             brightness_night: config.brightness_night,
             adaptive_config: config.adaptive.clone(),
             adaptive: AdaptiveController::default(),
@@ -196,7 +198,8 @@ impl NightLight {
 
         self.temp_day = config.temperature_day;
         self.temp_night = config.temperature_night;
-        self.transition_duration_mins = config.transition_duration;
+        self.elevation_day = config.elevation_day;
+        self.elevation_night = config.elevation_night;
         self.brightness_night = config.brightness_night;
         if self.adaptive_config != config.adaptive {
             // Device selection may have changed; re-resolve on next use.
@@ -267,47 +270,31 @@ impl NightLight {
         result
     }
 
-    /// Map solar elevation to color temperature.
+    /// Where the sun sits between full night (0.0) and full day (1.0).
     ///
-    /// Uses thresholds from redshift:
-    /// - Elevation > 3° → full daytime temperature
-    /// - Elevation between -3° and 3° → transitioning (linear interpolation)
-    /// - Elevation < -3° → full nighttime temperature
-    fn elevation_to_temperature(&self, elevation: f64) -> u32 {
-        const HIGH_ELEV: f64 = 3.0; // degrees above horizon = full day
-        const LOW_ELEV: f64 = -3.0; // degrees below horizon = full night
-
-        if elevation >= HIGH_ELEV {
-            self.temp_day
-        } else if elevation <= LOW_ELEV {
-            self.temp_night
-        } else {
-            // Linear interpolation
-            let t = (elevation - LOW_ELEV) / (HIGH_ELEV - LOW_ELEV);
-            let temp = self.temp_night as f64 + t * (self.temp_day as f64 - self.temp_night as f64);
-            temp.round() as u32
+    /// Full day at and above `elevation-day`, full night at and below `elevation-night`,
+    /// linear in between. The defaults (3° / -6°) are redshift's: the ramp starts a little
+    /// before sunset and finishes at the end of civil twilight.
+    fn day_fraction(&self, elevation: f64) -> f64 {
+        let low = self.elevation_night.min(self.elevation_day);
+        let high = self.elevation_day.max(self.elevation_night);
+        if high - low < f64::EPSILON {
+            return if elevation >= high { 1.0 } else { 0.0 };
         }
+        ((elevation - low) / (high - low)).clamp(0.0, 1.0)
     }
 
-    /// Map solar elevation to brightness.
-    ///
-    /// Same thresholds as temperature:
-    /// - Elevation > 3° → brightness 1.0 (full)
-    /// - Elevation between -3° and 3° → transitioning (linear interpolation)
-    /// - Elevation < -3° → brightness_night
-    fn elevation_to_brightness(&self, elevation: f64) -> f64 {
-        const HIGH_ELEV: f64 = 3.0;
-        const LOW_ELEV: f64 = -3.0;
+    /// Map solar elevation to color temperature.
+    fn elevation_to_temperature(&self, elevation: f64) -> u32 {
+        let t = self.day_fraction(elevation);
+        let temp = self.temp_night as f64 + t * (self.temp_day as f64 - self.temp_night as f64);
+        temp.round() as u32
+    }
 
-        if elevation >= HIGH_ELEV {
-            1.0
-        } else if elevation <= LOW_ELEV {
-            self.brightness_night
-        } else {
-            // Linear interpolation
-            let t = (elevation - LOW_ELEV) / (HIGH_ELEV - LOW_ELEV);
-            self.brightness_night + t * (1.0 - self.brightness_night)
-        }
+    /// Map solar elevation to brightness, from `brightness_night` up to 1.0.
+    fn elevation_to_brightness(&self, elevation: f64) -> f64 {
+        let t = self.day_fraction(elevation);
+        self.brightness_night + t * (1.0 - self.brightness_night)
     }
 }
 
@@ -326,7 +313,8 @@ mod tests {
             longitude: Some(-93.0),
             temp_day: 6500,
             temp_night: 4000,
-            transition_duration_mins: 30,
+            elevation_day: 3.0,
+            elevation_night: -3.0,
             brightness_night: 0.8,
             adaptive_config: AdaptiveNightLight::default(),
             adaptive: AdaptiveController::default(),
@@ -363,6 +351,25 @@ mod tests {
         assert_eq!(temp, 5250); // (4000 + 6500) / 2 = 5250
         let brightness = nl.elevation_to_brightness(0.0);
         assert!((brightness - 0.9).abs() < 0.001); // (0.8 + 1.0) / 2 = 0.9
+    }
+
+    #[test]
+    fn elevation_thresholds_come_from_config_and_survive_being_swapped() {
+        let mut nl = test_night_light();
+        nl.elevation_day = 10.0;
+        nl.elevation_night = -6.0;
+        assert_eq!(nl.elevation_to_temperature(10.0), 6500);
+        assert_eq!(nl.elevation_to_temperature(-6.0), 4000);
+        assert_eq!(nl.elevation_to_temperature(2.0), 5250);
+
+        // Reversed by mistake: still a sensible ramp instead of a divide-by-negative.
+        nl.elevation_day = -6.0;
+        nl.elevation_night = 10.0;
+        assert_eq!(nl.elevation_to_temperature(2.0), 5250);
+        nl.elevation_day = 0.0;
+        nl.elevation_night = 0.0;
+        assert_eq!(nl.elevation_to_temperature(0.1), 6500);
+        assert_eq!(nl.elevation_to_temperature(-0.1), 4000);
     }
 
     #[test]

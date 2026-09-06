@@ -261,6 +261,8 @@ Backlight writes go to `/sys/class/backlight` when that file is writable. It usu
 
 #### Matching the room's colour temperature
 
+The solar curve is full day at and above `elevation-day` (default `3.0` degrees) and full night at and below `elevation-night` (default `-6.0`, the end of civil twilight), ramping linearly in between; raise `elevation-day` to start warming earlier in the afternoon. `transition-duration` is still accepted but does nothing.
+
 By default the screen temperature follows the sun between `temperature-day` and `temperature-night`. If a sensor can report the room's actual colour temperature, point `temperature-path` at a file containing that value in kelvin and the screen will track the light you are sitting in instead: a warm bulb warms the screen, daylight leaves it neutral.
 
 With `temperature-path` set, `temperature-day` and `temperature-night` stop being the endpoints of a solar curve and become the bounds the measured value is clamped into. Set them to the warmest and coolest screen you are willing to accept.

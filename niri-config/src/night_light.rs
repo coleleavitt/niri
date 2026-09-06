@@ -19,8 +19,12 @@ pub struct NightLight {
     /// Nighttime color temperature in Kelvin (default: 3500)
     pub temperature_night: u32,
 
-    /// Transition duration in minutes (default: 30)
-    pub transition_duration: u32,
+    /// Solar elevation, in degrees, at and above which it is fully day (default: 3.0).
+    pub elevation_day: f64,
+
+    /// Solar elevation, in degrees, at and below which it is fully night (default: -6.0,
+    /// the end of civil twilight). Between the two the temperature ramps linearly.
+    pub elevation_night: f64,
 
     /// Brightness at night (0.0-1.0, default: 1.0)
     pub brightness_night: f64,
@@ -36,7 +40,8 @@ impl Default for NightLight {
             longitude: None,
             temperature_day: 6500,
             temperature_night: 3500,
-            transition_duration: 30,
+            elevation_day: 3.0,
+            elevation_night: -6.0,
             brightness_night: 1.0,
             adaptive: AdaptiveNightLight::default(),
         }
@@ -118,6 +123,13 @@ pub struct NightLightPart {
     #[knuffel(child, unwrap(argument))]
     pub temperature_night: Option<u32>,
 
+    #[knuffel(child, unwrap(argument))]
+    pub elevation_day: Option<f64>,
+
+    #[knuffel(child, unwrap(argument))]
+    pub elevation_night: Option<f64>,
+
+    /// Accepted for compatibility; the transition is defined by the elevation angles now.
     #[knuffel(child, unwrap(argument))]
     pub transition_duration: Option<u32>,
 
@@ -227,7 +239,8 @@ impl MergeWith<NightLightPart> for NightLight {
             (self, part),
             temperature_day,
             temperature_night,
-            transition_duration,
+            elevation_day,
+            elevation_night,
             brightness_night
         );
         if let Some(adaptive) = &part.adaptive {

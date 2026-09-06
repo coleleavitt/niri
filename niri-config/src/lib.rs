@@ -1732,7 +1732,8 @@ mod tests {
                 longitude: None,
                 temperature_day: 6500,
                 temperature_night: 3500,
-                transition_duration: 30,
+                elevation_day: 3.0,
+                elevation_night: -6.0,
                 brightness_night: 1.0,
                 adaptive: AdaptiveNightLight {
                     on: false,
