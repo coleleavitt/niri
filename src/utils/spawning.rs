@@ -564,3 +564,49 @@ mod systemd {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// Regression test: with the systemd double-fork, a missing binary used to deadlock
+    /// `Command::spawn()` (waiting on the intermediate child) against the intermediate child
+    /// (waiting on us), leaking a thread per failed spawn and never logging the error.
+    #[test]
+    fn spawning_a_missing_binary_returns_promptly() {
+        let start = Instant::now();
+        let handle = thread::spawn(|| {
+            spawn_sync(
+                "niri-test-definitely-missing-binary",
+                std::iter::empty::<&str>(),
+                None,
+            );
+        });
+
+        while !handle.is_finished() {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "spawn_sync() of a missing binary did not return: exec failure deadlock"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        handle.join().unwrap();
+    }
+
+    /// The happy path must still work, including commands that exit immediately.
+    #[test]
+    fn spawning_a_short_lived_command_returns_promptly() {
+        let start = Instant::now();
+        let handle = thread::spawn(|| {
+            spawn_sync("true", std::iter::empty::<&str>(), None);
+        });
+
+        while !handle.is_finished() {
+            assert!(start.elapsed() < Duration::from_secs(10));
+            thread::sleep(Duration::from_millis(10));
+        }
+        handle.join().unwrap();
+    }
+}
