@@ -11,6 +11,7 @@
 //! the first time the kernel says no.
 
 use std::io;
+use std::time::{Duration, Instant};
 
 use niri_config::night_light::AdaptiveNightLight;
 
@@ -24,6 +25,10 @@ pub struct Backlight {
     device: BacklightDevice,
     /// Set once sysfs has refused a write; we do not probe it again.
     use_logind: bool,
+    /// The raw value of our last successful write, to detect someone else moving the backlight.
+    last_written: Option<u64>,
+    /// While set, a manual change is being honoured and we do not touch the backlight.
+    manual_hold_until: Option<Instant>,
     #[cfg(feature = "dbus")]
     conn: Option<zbus::blocking::Connection>,
 }
@@ -33,15 +38,63 @@ impl Backlight {
         Ok(Self {
             device: sysfs::backlight_device(config)?,
             use_logind: false,
+            last_written: None,
+            manual_hold_until: None,
             #[cfg(feature = "dbus")]
             conn: None,
         })
     }
 
+    /// Whether a manual brightness change is currently being honoured.
+    ///
+    /// Compares the kernel's current value with what we last wrote. A mismatch means the user
+    /// (brightness keys, `brightnessctl`, ...) set it on purpose; the adaptive controller then
+    /// backs off for `hold` so it does not undo them a minute later. `hold == 0` disables this.
+    pub fn manual_override_active(&mut self, hold: Duration) -> bool {
+        if hold.is_zero() {
+            return false;
+        }
+
+        let now = Instant::now();
+        if let Some(until) = self.manual_hold_until {
+            if now < until {
+                return true;
+            }
+            self.manual_hold_until = None;
+        }
+
+        let Some(last) = self.last_written else {
+            return false;
+        };
+        match self.device.read_current() {
+            // The panel may round our value; only a real difference counts.
+            Ok(current) if current.abs_diff(last) > 1 => {
+                debug!(
+                    "night-light: backlight moved externally ({last} -> {current}), \
+                     pausing adaptive backlight for {}s",
+                    hold.as_secs()
+                );
+                self.manual_hold_until = Some(now + hold);
+                // Whatever the user picked is the new baseline: only a second manual
+                // change should extend the hold, not our own resumption.
+                self.last_written = Some(current);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Applies a 0.0..=1.0 ratio of the device's maximum brightness.
     pub fn set_ratio(&mut self, ratio: f64) -> io::Result<()> {
         let target = self.device.target_for(ratio);
+        let result = self.write(target);
+        if result.is_ok() {
+            self.last_written = Some(target);
+        }
+        result
+    }
 
+    fn write(&mut self, target: u64) -> io::Result<()> {
         if !self.use_logind {
             match self.device.write_sysfs(target) {
                 Ok(()) => return Ok(()),
@@ -100,7 +153,77 @@ fn is_permission_denied(err: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
     use super::*;
+
+    fn fake_device(name: &str) -> (PathBuf, Backlight) {
+        let root =
+            std::env::temp_dir().join(format!("niri-backlight-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("max_brightness"), "800\n").unwrap();
+        fs::write(root.join("brightness"), "400\n").unwrap();
+        let config = AdaptiveNightLight {
+            backlight_path: Some(root.clone()),
+            ..Default::default()
+        };
+        let backlight = Backlight::new(&config).unwrap();
+        (root, backlight)
+    }
+
+    #[test]
+    fn manual_change_pauses_adaptive_backlight() {
+        let (root, mut backlight) = fake_device("manual");
+        let hold = Duration::from_secs(60);
+
+        // Nothing written yet: whatever the panel says is not an override.
+        assert!(!backlight.manual_override_active(hold));
+
+        backlight.set_ratio(0.5).unwrap();
+        assert_eq!(fs::read_to_string(root.join("brightness")).unwrap(), "400");
+        assert!(!backlight.manual_override_active(hold));
+
+        // The user hit the brightness keys.
+        fs::write(root.join("brightness"), "700\n").unwrap();
+        assert!(backlight.manual_override_active(hold));
+        // Still held on the next tick, and the user's value became the baseline.
+        assert!(backlight.manual_override_active(hold));
+        assert_eq!(backlight.last_written, Some(700));
+
+        // Holds are opt-out.
+        let mut fresh = Backlight::new(&AdaptiveNightLight {
+            backlight_path: Some(root.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        fresh.set_ratio(0.25).unwrap();
+        fs::write(root.join("brightness"), "700\n").unwrap();
+        assert!(!fresh.manual_override_active(Duration::ZERO));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn panel_rounding_is_not_a_manual_change() {
+        let (root, mut backlight) = fake_device("rounding");
+        backlight.set_ratio(0.5).unwrap();
+        fs::write(root.join("brightness"), "401\n").unwrap();
+        assert!(!backlight.manual_override_active(Duration::from_secs(60)));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hold_expires_and_adaptive_resumes() {
+        let (root, mut backlight) = fake_device("expiry");
+        backlight.set_ratio(0.5).unwrap();
+        fs::write(root.join("brightness"), "700\n").unwrap();
+        assert!(backlight.manual_override_active(Duration::from_millis(1)));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(!backlight.manual_override_active(Duration::from_millis(1)));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     /// Drives the real panel. Ignored by default because it needs an active
     /// logind session and visibly changes the screen.

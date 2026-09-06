@@ -856,6 +856,17 @@ impl State {
     fn refresh(&mut self) {
         let _span = tracy_client::span!("State::refresh");
 
+        // A newly connected output starts with identity gamma; do not leave it untinted until
+        // the next periodic tick happens to change something.
+        if self
+            .niri
+            .night_light
+            .as_ref()
+            .is_some_and(|night_light| night_light.needs_reapply())
+        {
+            self.night_light_tick();
+        }
+
         // Handle commits for surfaces whose blockers cleared this cycle. This should happen before
         // layout.refresh() since this is where these surfaces handle commits.
         self.notify_blocker_cleared();
@@ -1791,10 +1802,11 @@ impl State {
         // clients will use the new xdg-decoration setting.
 
         // Reload night-light configuration.
+        let mut reset_night_light_gamma = false;
         {
             let config = self.niri.config.borrow();
             if let Some(night_light) = &mut self.niri.night_light {
-                night_light.update_config(&config.night_light);
+                reset_night_light_gamma = night_light.update_config(&config.night_light);
             } else {
                 // Night-light was not enabled before; try to create it now.
                 self.niri.night_light = crate::night_light::NightLight::new(&config.night_light);
@@ -1814,8 +1826,30 @@ impl State {
                 }
             }
         }
+        if reset_night_light_gamma {
+            self.reset_night_light_gamma();
+        } else {
+            // Apply any changed temperature bounds right away instead of up to a minute later.
+            self.night_light_tick();
+        }
 
         self.niri.queue_redraw_all();
+    }
+
+    /// Removes our gamma ramps from every output after night-light was switched off.
+    fn reset_night_light_gamma(&mut self) {
+        let Backend::Tty(tty) = &mut self.backend else {
+            return;
+        };
+
+        for output in self.niri.sorted_outputs.clone() {
+            if let Err(err) = tty.set_gamma(&output, None) {
+                warn!(
+                    "night-light: failed to reset gamma for {}: {err:?}",
+                    output.name()
+                );
+            }
+        }
     }
 
     /// Periodic callback for the night-light feature.
@@ -3036,6 +3070,11 @@ impl Niri {
 
     pub fn add_output(&mut self, output: Output, refresh_interval: Option<Duration>, vrr: bool) {
         let global = output.create_global::<State>(&self.display_handle);
+
+        // The backend resets GAMMA_LUT when it sets up a connector; re-tint on the next refresh.
+        if let Some(night_light) = &mut self.night_light {
+            night_light.request_reapply();
+        }
 
         let name = output.user_data().get::<OutputName>().unwrap();
 

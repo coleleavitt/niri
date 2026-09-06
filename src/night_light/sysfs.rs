@@ -62,6 +62,14 @@ impl BacklightDevice {
     pub fn write_sysfs(&self, target: u64) -> io::Result<()> {
         fs::write(self.directory.join("brightness"), target.to_string())
     }
+
+    /// Reads the brightness the kernel currently reports for the device.
+    ///
+    /// `brightness` is world-readable even when it is not writable, so this works for the
+    /// logind path too.
+    pub fn read_current(&self) -> io::Result<u64> {
+        read_u64(&self.directory.join("brightness"))
+    }
 }
 
 pub fn backlight_device(config: &AdaptiveNightLight) -> io::Result<BacklightDevice> {

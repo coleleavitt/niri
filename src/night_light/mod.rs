@@ -5,7 +5,7 @@ pub mod solar;
 pub mod sysfs;
 
 use std::io;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use adaptive::AdaptiveController;
 use backlight::Backlight;
@@ -37,6 +37,10 @@ pub struct NightLight {
     external_gamma_active: bool,
     /// Whether the feature is enabled
     enabled: bool,
+    /// Set when the ramps on the outputs no longer match `current_*` and must be re-applied
+    /// even if the target did not change: a new output, an external gamma client letting go,
+    /// or a config reload.
+    needs_reapply: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -67,6 +71,7 @@ impl NightLight {
             current_brightness: 1.0,
             external_gamma_active: false,
             enabled: true,
+            needs_reapply: true,
         })
     }
 
@@ -109,12 +114,14 @@ impl NightLight {
         let target_brightness = (solar_brightness * adaptive.gamma_brightness).clamp(0.0, 1.0);
 
         let gamma_changed = !self.external_gamma_active
-            && (target_temp != self.current_temp
+            && (self.needs_reapply
+                || target_temp != self.current_temp
                 || (target_brightness - self.current_brightness).abs() > 0.001);
 
         if gamma_changed {
             self.current_temp = target_temp;
             self.current_brightness = target_brightness;
+            self.needs_reapply = false;
         }
 
         (gamma_changed || adaptive.backlight.is_some()).then_some(NightLightUpdate {
@@ -127,7 +134,24 @@ impl NightLight {
 
     /// Notify that an external wlr-gamma-control client connected for an output.
     pub fn set_external_gamma_active(&mut self, active: bool) {
+        if self.external_gamma_active && !active {
+            // The client reset the ramps to identity on its way out; ours must go back.
+            self.needs_reapply = true;
+        }
         self.external_gamma_active = active;
+    }
+
+    /// Whether the output ramps are known to be out of date.
+    pub fn needs_reapply(&self) -> bool {
+        self.enabled && !self.external_gamma_active && self.needs_reapply
+    }
+
+    /// Forces the next tick to re-apply the current ramps.
+    ///
+    /// Call this whenever something reset the hardware gamma behind our back, e.g. a newly
+    /// connected output (`connector_connected` resets GAMMA_LUT) or a session resume.
+    pub fn request_reapply(&mut self) {
+        self.needs_reapply = true;
     }
 
     /// Whether we should be applying gamma ourselves.
@@ -146,8 +170,13 @@ impl NightLight {
     }
 
     /// Update from config (e.g. on config reload).
-    pub fn update_config(&mut self, config: &NightLightConfig) {
+    ///
+    /// Returns `true` when the feature was just switched off, so the caller can reset the
+    /// output ramps; without that the last tint stays on screen until the compositor exits.
+    pub fn update_config(&mut self, config: &NightLightConfig) -> bool {
+        let was_enabled = self.enabled;
         self.enabled = config_enabled(config);
+        self.needs_reapply = true;
         self.latitude = config.latitude;
         self.longitude = config.longitude;
 
@@ -160,6 +189,8 @@ impl NightLight {
             self.backlight = None;
         }
         self.adaptive_config = config.adaptive.clone();
+
+        was_enabled && !self.enabled
     }
 
     pub fn read_ambient_lux(&self) -> Option<f64> {
@@ -201,7 +232,16 @@ impl NightLight {
             }
         }
 
-        let result = self.backlight.as_mut().unwrap().set_ratio(ratio);
+        let backlight = self.backlight.as_mut().unwrap();
+        let hold = Duration::from_secs(self.adaptive_config.manual_hold_secs);
+        if backlight.manual_override_active(hold) {
+            // Forget the target so the controller offers it again once the hold expires,
+            // instead of hysteresis treating the never-applied value as current.
+            self.adaptive.invalidate_backlight();
+            return Ok(());
+        }
+
+        let result = backlight.set_ratio(ratio);
         if result.is_err() {
             // The controller recorded this ratio as applied before we tried it,
             // so clear it or hysteresis suppresses every future attempt and the
@@ -281,6 +321,7 @@ mod tests {
             current_brightness: 1.0,
             external_gamma_active: false,
             enabled: true,
+            needs_reapply: false,
         }
     }
 
@@ -404,6 +445,68 @@ mod tests {
         // No coordinates and no sensor: temperature-day is the constant.
         let update = nl.tick(Some(200.0), None).unwrap();
         assert_eq!(update.temperature, 6500);
+    }
+
+    #[test]
+    fn first_tick_applies_gamma_even_when_nothing_changed() {
+        // A fresh instance starts at temperature-day / brightness 1.0, which is exactly the
+        // no-op target without coordinates. The ramps must still be sent once, because the
+        // hardware starts at identity and 6500K through our curve is not quite identity.
+        let config = NightLightConfig {
+            adaptive: AdaptiveNightLight {
+                on: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut nl = NightLight::new(&config).unwrap();
+
+        let update = nl.tick(None, None).unwrap();
+        assert!(update.gamma_changed);
+        assert!(nl.tick(None, None).is_none());
+    }
+
+    #[test]
+    fn reapply_is_requested_after_external_gamma_releases_and_new_outputs() {
+        let mut nl = test_night_light();
+        nl.latitude = None;
+        nl.longitude = None;
+        assert!(nl.tick(None, None).is_none());
+
+        // The client reset the ramps on its way out: ours go back without waiting for drift.
+        nl.set_external_gamma_active(true);
+        assert!(!nl.needs_reapply());
+        nl.set_external_gamma_active(false);
+        assert!(nl.needs_reapply());
+        assert!(nl.tick(None, None).unwrap().gamma_changed);
+        assert!(!nl.needs_reapply());
+
+        // Same for a connector that came up with identity gamma.
+        nl.request_reapply();
+        assert!(nl.tick(None, None).unwrap().gamma_changed);
+        assert!(nl.tick(None, None).is_none());
+    }
+
+    #[test]
+    fn switching_off_reports_that_gamma_must_be_reset() {
+        let on = NightLightConfig {
+            adaptive: AdaptiveNightLight {
+                on: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut nl = NightLight::new(&on).unwrap();
+        assert!(!nl.update_config(&on));
+
+        let off = NightLightConfig {
+            off: true,
+            ..on.clone()
+        };
+        assert!(nl.update_config(&off));
+        assert!(!nl.should_apply());
+        // Only the transition reports it, not every reload while off.
+        assert!(!nl.update_config(&off));
     }
 
     #[test]

@@ -250,9 +250,12 @@ night-light {
         gamma-min 0.7
         smoothing 0.25
         hysteresis 0.02
+        manual-hold-secs 600
     }
 }
 ```
+
+The backlight is read back before every adaptive write. If it is not where niri last left it, something else (brightness keys, `brightnessctl`, ...) changed it on purpose, and the adaptive backlight pauses for `manual-hold-secs` (default 600) before taking over again. Set it to `0` to let the sensor always win.
 
 Backlight writes go to `/sys/class/backlight` when that file is writable. It usually isn't for a normal user session, so niri falls back to logind's `org.freedesktop.login1.Session.SetBrightness`, which is performed unprivileged for the active session. No udev rule is required.
 
