@@ -67,6 +67,12 @@ pub struct AdaptiveNightLight {
     pub gamma_min: f64,
     pub smoothing: f64,
     pub hysteresis: f64,
+    /// How long a manual brightness change (keys, brightnessctl, ...) pauses the adaptive
+    /// backlight, in seconds. `0` means the sensor always wins.
+    ///
+    /// The backlight is read back before every write; if it is not where we left it, someone
+    /// else set it on purpose and fighting them minutes later is the worst possible outcome.
+    pub manual_hold_secs: u64,
 }
 
 impl Default for AdaptiveNightLight {
@@ -86,6 +92,7 @@ impl Default for AdaptiveNightLight {
             gamma_min: 0.7,
             smoothing: 0.25,
             hysteresis: 0.02,
+            manual_hold_secs: 600,
         }
     }
 }
@@ -163,6 +170,9 @@ pub struct AdaptiveNightLightPart {
 
     #[knuffel(child, unwrap(argument))]
     pub hysteresis: Option<f64>,
+
+    #[knuffel(child, unwrap(argument))]
+    pub manual_hold_secs: Option<u64>,
 }
 
 impl MergeWith<AdaptiveNightLightPart> for AdaptiveNightLight {
@@ -191,7 +201,8 @@ impl MergeWith<AdaptiveNightLightPart> for AdaptiveNightLight {
             gamma_dim_below,
             gamma_min,
             smoothing,
-            hysteresis
+            hysteresis,
+            manual_hold_secs
         );
     }
 }
@@ -289,7 +300,7 @@ mod tests {
 
     #[test]
     fn temperature_sensor_is_opt_in() {
-        let night_light = parse_night_light("adaptive { on }");
+        let night_light = parse_night_light("adaptive { on; }");
         assert!(night_light.adaptive.temperature_path.is_none());
         // A sampler that dies must not pin the screen forever.
         assert_eq!(night_light.adaptive.sensor_max_age_secs, 300);

@@ -1737,6 +1737,8 @@ mod tests {
                 adaptive: AdaptiveNightLight {
                     on: false,
                     sensor_path: None,
+                    temperature_path: None,
+                    sensor_max_age_secs: 300,
                     backlight_name: None,
                     backlight_path: None,
                     low_lux: 2.0,
@@ -1747,6 +1749,7 @@ mod tests {
                     gamma_min: 0.7,
                     smoothing: 0.25,
                     hysteresis: 0.02,
+                    manual_hold_secs: 600,
                 },
             },
             overview: Overview {

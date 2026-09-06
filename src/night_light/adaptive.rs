@@ -236,7 +236,9 @@ mod tests {
 
         // No temperature sensor means no opinion, not a default.
         assert_eq!(
-            controller.tick(&config, Some(50.0), None).ambient_temperature,
+            controller
+                .tick(&config, Some(50.0), None)
+                .ambient_temperature,
             None
         );
     }
