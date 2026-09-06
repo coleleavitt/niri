@@ -108,10 +108,23 @@ impl NightLight {
         // bounds. With coordinates, night still means warm even in a daylight-coloured room
         // (a webcam under a cool LED bulb would otherwise keep the screen at 6500K at 2am), and
         // a warm lamp during the day still warms the screen beyond the solar curve.
-        let target_temp = match adaptive.ambient_temperature {
+        let mut target_temp = match adaptive.ambient_temperature {
             Some(kelvin) => self.clamp_temperature(kelvin).min(solar_temp),
             None => solar_temp,
         };
+
+        // A dim room warms the screen too. Blue light is far more glaring against dark
+        // surroundings, and a webcam's colour reading says nothing about that: a dim room
+        // under daylight from a window still reads 6300K. Map low-lux..high-lux onto
+        // temperature-night..temperature-day and let it cap the target like the sun does.
+        if self.adaptive_config.temperature_from_lux {
+            if let Some(position) = adaptive.lux_position {
+                let night = self.temp_night.min(self.temp_day) as f64;
+                let day = self.temp_night.max(self.temp_day) as f64;
+                let from_lux = (night + position * (day - night)).round() as u32;
+                target_temp = target_temp.min(from_lux);
+            }
+        }
         let target_brightness = (solar_brightness * adaptive.gamma_brightness).clamp(0.0, 1.0);
 
         let gamma_changed = !self.external_gamma_active
@@ -449,6 +462,46 @@ mod tests {
         // ...but a warm bulb still pulls it warmer than the schedule allows for.
         nl.temp_night = 2700;
         assert_eq!(nl.tick(Some(50.0), Some(2900.0)).unwrap().temperature, 2900);
+    }
+
+    #[test]
+    fn a_dim_room_warms_the_screen_when_temperature_from_lux_is_on() {
+        let config = NightLightConfig {
+            temperature_day: 6500,
+            temperature_night: 2700,
+            adaptive: AdaptiveNightLight {
+                on: true,
+                smoothing: 1.0,
+                low_lux: 2.0,
+                high_lux: 300.0,
+                temperature_from_lux: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut nl = NightLight::new(&config).unwrap();
+
+        // Pitch dark: full night temperature even though the room reads daylight.
+        assert_eq!(nl.tick(Some(0.0), Some(6300.0)).unwrap().temperature, 2700);
+        // Bright: the room's own reading is the only cap left.
+        assert_eq!(
+            nl.tick(Some(1000.0), Some(6300.0)).unwrap().temperature,
+            6300
+        );
+        // Dim daylit room, like a laptop by a window with the blinds down: in between.
+        let dim = nl.tick(Some(5.0), Some(6300.0)).unwrap().temperature;
+        assert!((3000..=3600).contains(&dim), "{dim}");
+
+        // Off by default: the same dim room stays at the room's colour.
+        let off = NightLightConfig {
+            adaptive: AdaptiveNightLight {
+                temperature_from_lux: false,
+                ..config.adaptive.clone()
+            },
+            ..config
+        };
+        let mut nl = NightLight::new(&off).unwrap();
+        assert_eq!(nl.tick(Some(5.0), Some(6300.0)).unwrap().temperature, 6300);
     }
 
     #[test]

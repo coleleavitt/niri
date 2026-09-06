@@ -1750,6 +1750,7 @@ mod tests {
                     smoothing: 0.25,
                     hysteresis: 0.02,
                     manual_hold_secs: 600,
+                    temperature_from_lux: false,
                 },
             },
             overview: Overview {

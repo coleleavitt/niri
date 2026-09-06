@@ -265,6 +265,8 @@ By default the screen temperature follows the sun between `temperature-day` and 
 
 With `temperature-path` set, `temperature-day` and `temperature-night` stop being the endpoints of a solar curve and become the bounds the measured value is clamped into. Set them to the warmest and coolest screen you are willing to accept.
 
+Add `temperature-from-lux` inside `adaptive` to also warm the screen as the room gets darker: `low-lux` maps to `temperature-night`, `high-lux` to `temperature-day`, and the result caps the target the same way. A dim room lit by a window still measures as daylight-coloured, but blue light is much more glaring against dark surroundings, so this is usually what you want for eye comfort.
+
 If `latitude` and `longitude` are also set, the solar curve acts as a ceiling: the screen is never cooler than the schedule says, but a warm lamp can still pull it warmer. So at night the screen goes warm even under a daylight-coloured bulb, and during the day it follows the room.
 
 ```kdl

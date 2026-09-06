@@ -6,6 +6,9 @@ pub struct AdaptiveUpdate {
     pub gamma_brightness: f64,
     /// Smoothed room colour temperature in kelvin, when a sensor supplies one.
     pub ambient_temperature: Option<f64>,
+    /// Where the smoothed lux sits between `low-lux` (0.0) and `high-lux` (1.0), when the
+    /// light sensor has a reading. Lets the caller warm the screen in dim rooms.
+    pub lux_position: Option<f64>,
 }
 
 #[derive(Debug, Default)]
@@ -27,6 +30,7 @@ impl AdaptiveController {
                 backlight: None,
                 gamma_brightness: 1.0,
                 ambient_temperature: None,
+                lux_position: None,
             };
         }
 
@@ -41,6 +45,7 @@ impl AdaptiveController {
                 backlight: None,
                 gamma_brightness: 1.0,
                 ambient_temperature: temperature,
+                lux_position: None,
             };
         };
 
@@ -53,6 +58,11 @@ impl AdaptiveController {
             backlight,
             gamma_brightness,
             ambient_temperature: temperature,
+            lux_position: Some(lux_position(
+                lux,
+                config.low_lux.max(0.0),
+                config.high_lux.max(config.low_lux.max(0.0) + 1.0),
+            )),
         }
     }
 

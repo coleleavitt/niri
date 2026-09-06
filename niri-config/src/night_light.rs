@@ -73,6 +73,9 @@ pub struct AdaptiveNightLight {
     /// The backlight is read back before every write; if it is not where we left it, someone
     /// else set it on purpose and fighting them minutes later is the worst possible outcome.
     pub manual_hold_secs: u64,
+    /// Also warm the screen as the room gets darker: `low-lux` maps to `temperature-night`,
+    /// `high-lux` to `temperature-day`, and the result caps the target like the sun does.
+    pub temperature_from_lux: bool,
 }
 
 impl Default for AdaptiveNightLight {
@@ -93,6 +96,7 @@ impl Default for AdaptiveNightLight {
             smoothing: 0.25,
             hysteresis: 0.02,
             manual_hold_secs: 600,
+            temperature_from_lux: false,
         }
     }
 }
@@ -173,6 +177,9 @@ pub struct AdaptiveNightLightPart {
 
     #[knuffel(child, unwrap(argument))]
     pub manual_hold_secs: Option<u64>,
+
+    #[knuffel(child)]
+    pub temperature_from_lux: bool,
 }
 
 impl MergeWith<AdaptiveNightLightPart> for AdaptiveNightLight {
@@ -204,6 +211,9 @@ impl MergeWith<AdaptiveNightLightPart> for AdaptiveNightLight {
             hysteresis,
             manual_hold_secs
         );
+        if part.temperature_from_lux {
+            self.temperature_from_lux = true;
+        }
     }
 }
 
