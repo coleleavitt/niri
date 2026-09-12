@@ -29,7 +29,100 @@ pub struct NightLight {
     /// Brightness at night (0.0-1.0, default: 1.0)
     pub brightness_night: f64,
 
+    /// Clock-anchored bedtime stage, warmer than the solar night.
+    ///
+    /// The evidence for warm screens is about the hours before sleep, not about the sun: in
+    /// December the sun sets six hours before most people go to bed. From `bedtime` minus
+    /// `bedtime_lead_mins` the temperature ramps over `bedtime_ramp_mins` down to
+    /// `temperature_bedtime` and stays there until `wake`.
+    pub bedtime: Option<ClockTime>,
+
+    /// When the bedtime stage ends (default: 06:00).
+    pub wake: ClockTime,
+
+    /// Colour temperature during the bedtime stage in Kelvin (default: 2700).
+    pub temperature_bedtime: u32,
+
+    /// How long before `bedtime` the ramp starts, in minutes (default: 180).
+    pub bedtime_lead_mins: u32,
+
+    /// How long the ramp to `temperature_bedtime` takes, in minutes (default: 60).
+    pub bedtime_ramp_mins: u32,
+
     pub adaptive: AdaptiveNightLight,
+}
+
+/// A wall-clock time of day, `HH:MM`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockTime {
+    pub minutes: u32,
+}
+
+impl ClockTime {
+    pub const fn new(hour: u32, minute: u32) -> Self {
+        Self {
+            minutes: hour * 60 + minute,
+        }
+    }
+}
+
+impl std::str::FromStr for ClockTime {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (hour, minute) = s
+            .split_once(':')
+            .ok_or_else(|| format!("expected HH:MM, got {s:?}"))?;
+        let hour: u32 = hour
+            .trim()
+            .parse()
+            .map_err(|_| format!("bad hour in {s:?}"))?;
+        let minute: u32 = minute
+            .trim()
+            .parse()
+            .map_err(|_| format!("bad minute in {s:?}"))?;
+        if hour > 23 || minute > 59 {
+            return Err(format!("{s:?} is not a time of day"));
+        }
+        Ok(Self::new(hour, minute))
+    }
+}
+
+impl<S: knuffel::traits::ErrorSpan> knuffel::DecodeScalar<S> for ClockTime {
+    fn type_check(
+        type_name: &Option<knuffel::span::Spanned<knuffel::ast::TypeName, S>>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) {
+        if let Some(type_name) = &type_name {
+            ctx.emit_error(knuffel::errors::DecodeError::unexpected(
+                type_name,
+                "type name",
+                "no type name expected for this node",
+            ));
+        }
+    }
+
+    fn raw_decode(
+        val: &knuffel::span::Spanned<knuffel::ast::Literal, S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, knuffel::errors::DecodeError<S>> {
+        match &**val {
+            knuffel::ast::Literal::String(s) => match s.parse::<Self>() {
+                Ok(time) => Ok(time),
+                Err(err) => {
+                    ctx.emit_error(knuffel::errors::DecodeError::conversion(val, err));
+                    Ok(Self::new(0, 0))
+                }
+            },
+            _ => {
+                ctx.emit_error(knuffel::errors::DecodeError::unsupported(
+                    val,
+                    "expected a \"HH:MM\" string",
+                ));
+                Ok(Self::new(0, 0))
+            }
+        }
+    }
 }
 
 impl Default for NightLight {
@@ -43,6 +136,11 @@ impl Default for NightLight {
             elevation_day: 3.0,
             elevation_night: -6.0,
             brightness_night: 1.0,
+            bedtime: None,
+            wake: ClockTime::new(6, 0),
+            temperature_bedtime: 2700,
+            bedtime_lead_mins: 180,
+            bedtime_ramp_mins: 60,
             adaptive: AdaptiveNightLight::default(),
         }
     }
@@ -78,9 +176,14 @@ pub struct AdaptiveNightLight {
     /// The backlight is read back before every write; if it is not where we left it, someone
     /// else set it on purpose and fighting them minutes later is the worst possible outcome.
     pub manual_hold_secs: u64,
-    /// Also warm the screen as the room gets darker: `low-lux` maps to `temperature-night`,
+    /// Also warm the screen as the room gets darker: `low-lux` maps to `temperature-dim`,
     /// `high-lux` to `temperature-day`, and the result caps the target like the sun does.
     pub temperature_from_lux: bool,
+    /// The warm end of the lux mapping in Kelvin. `None` means `temperature-night`.
+    ///
+    /// A dark room in the afternoon should get a *dim* screen first and only a mildly warm
+    /// one; the clock and the sun own the bedtime-warm end.
+    pub temperature_dim: Option<u32>,
 }
 
 impl Default for AdaptiveNightLight {
@@ -102,6 +205,7 @@ impl Default for AdaptiveNightLight {
             hysteresis: 0.02,
             manual_hold_secs: 600,
             temperature_from_lux: false,
+            temperature_dim: None,
         }
     }
 }
@@ -135,6 +239,21 @@ pub struct NightLightPart {
 
     #[knuffel(child, unwrap(argument))]
     pub brightness_night: Option<f64>,
+
+    #[knuffel(child, unwrap(argument))]
+    pub bedtime: Option<ClockTime>,
+
+    #[knuffel(child, unwrap(argument))]
+    pub wake: Option<ClockTime>,
+
+    #[knuffel(child, unwrap(argument))]
+    pub temperature_bedtime: Option<u32>,
+
+    #[knuffel(child, unwrap(argument))]
+    pub bedtime_lead_mins: Option<u32>,
+
+    #[knuffel(child, unwrap(argument))]
+    pub bedtime_ramp_mins: Option<u32>,
 
     #[knuffel(child)]
     pub adaptive: Option<AdaptiveNightLightPart>,
@@ -192,6 +311,9 @@ pub struct AdaptiveNightLightPart {
 
     #[knuffel(child)]
     pub temperature_from_lux: bool,
+
+    #[knuffel(child, unwrap(argument))]
+    pub temperature_dim: Option<u32>,
 }
 
 impl MergeWith<AdaptiveNightLightPart> for AdaptiveNightLight {
@@ -226,6 +348,7 @@ impl MergeWith<AdaptiveNightLightPart> for AdaptiveNightLight {
         if part.temperature_from_lux {
             self.temperature_from_lux = true;
         }
+        merge_clone_opt!((self, part), temperature_dim);
     }
 }
 
@@ -234,14 +357,18 @@ impl MergeWith<NightLightPart> for NightLight {
         if part.off {
             self.off = true;
         }
-        merge_clone_opt!((self, part), latitude, longitude);
+        merge_clone_opt!((self, part), latitude, longitude, bedtime);
         merge_clone!(
             (self, part),
             temperature_day,
             temperature_night,
             elevation_day,
             elevation_night,
-            brightness_night
+            brightness_night,
+            wake,
+            temperature_bedtime,
+            bedtime_lead_mins,
+            bedtime_ramp_mins
         );
         if let Some(adaptive) = &part.adaptive {
             self.adaptive.merge_with(adaptive);
@@ -319,6 +446,36 @@ mod tests {
             PathBuf::from("/tmp/ambient-temp")
         );
         assert_eq!(night_light.adaptive.sensor_max_age_secs, 90);
+    }
+
+    #[test]
+    fn bedtime_stage_parses_clock_times() {
+        let night_light = parse_night_light(
+            r#"
+            bedtime "23:30"
+            wake "06:45"
+            temperature-bedtime 2000
+            bedtime-lead-mins 120
+            bedtime-ramp-mins 45
+            adaptive { temperature-from-lux; temperature-dim 3400; }
+            "#,
+        );
+        assert_eq!(night_light.bedtime, Some(ClockTime::new(23, 30)));
+        assert_eq!(night_light.wake, ClockTime::new(6, 45));
+        assert_eq!(night_light.temperature_bedtime, 2000);
+        assert_eq!(night_light.bedtime_lead_mins, 120);
+        assert_eq!(night_light.bedtime_ramp_mins, 45);
+        assert_eq!(night_light.adaptive.temperature_dim, Some(3400));
+
+        let defaults = parse_night_light("");
+        assert_eq!(defaults.bedtime, None);
+        assert_eq!(defaults.wake, ClockTime::new(6, 0));
+        assert_eq!(defaults.adaptive.temperature_dim, None);
+
+        let bad: Result<NightLightPart, _> = knuffel::parse("test.kdl", r#"bedtime "25:00""#);
+        assert!(bad.is_err());
+        let bad: Result<NightLightPart, _> = knuffel::parse("test.kdl", "bedtime 2330");
+        assert!(bad.is_err());
     }
 
     #[test]

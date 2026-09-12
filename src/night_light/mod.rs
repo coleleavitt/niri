@@ -25,6 +25,12 @@ pub struct NightLight {
     elevation_day: f64,
     elevation_night: f64,
     brightness_night: f64,
+    /// Start of the bedtime stage, as minutes of the local day, and its end.
+    bedtime: Option<u32>,
+    wake: u32,
+    temp_bedtime: u32,
+    bedtime_lead_mins: u32,
+    bedtime_ramp_mins: u32,
     adaptive_config: AdaptiveNightLight,
     adaptive: AdaptiveController,
     /// Resolved backlight output, created on first use.
@@ -66,6 +72,11 @@ impl NightLight {
             elevation_day: config.elevation_day,
             elevation_night: config.elevation_night,
             brightness_night: config.brightness_night,
+            bedtime: config.bedtime.map(|t| t.minutes),
+            wake: config.wake.minutes,
+            temp_bedtime: config.temperature_bedtime,
+            bedtime_lead_mins: config.bedtime_lead_mins,
+            bedtime_ramp_mins: config.bedtime_ramp_mins,
             adaptive_config: config.adaptive.clone(),
             adaptive: AdaptiveController::default(),
             backlight: None,
@@ -86,12 +97,22 @@ impl NightLight {
             return None;
         }
 
+        let now = SystemTime::now();
+        self.tick_at(now, ambient_lux, ambient_temperature)
+    }
+
+    fn tick_at(
+        &mut self,
+        now: SystemTime,
+        ambient_lux: Option<f64>,
+        ambient_temperature: Option<f64>,
+    ) -> Option<NightLightUpdate> {
         let adaptive = self
             .adaptive
             .tick(&self.adaptive_config, ambient_lux, ambient_temperature);
         let (solar_temp, solar_brightness) =
             if let (Some(latitude), Some(longitude)) = (self.latitude, self.longitude) {
-                let now = SystemTime::now()
+                let now = now
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs_f64();
@@ -115,16 +136,31 @@ impl NightLight {
             None => solar_temp,
         };
 
-        // A dim room warms the screen too. Blue light is far more glaring against dark
+        // A dim room warms the screen a little too. Blue light is more glaring against dark
         // surroundings, and a webcam's colour reading says nothing about that: a dim room
         // under daylight from a window still reads 6300K. Map low-lux..high-lux onto
-        // temperature-night..temperature-day and let it cap the target like the sun does.
+        // temperature-dim..temperature-day and let it cap the target like the sun does.
+        // The warm end deliberately defaults to temperature-night, not bedtime warmth: a dark
+        // room in the afternoon wants a *dim* screen first (Fotios 2017), the clock owns the
+        // rest.
         if self.adaptive_config.temperature_from_lux {
             if let Some(position) = adaptive.lux_position {
-                let night = self.temp_night.min(self.temp_day) as f64;
-                let day = self.temp_night.max(self.temp_day) as f64;
-                let from_lux = (night + position * (day - night)).round() as u32;
-                target_temp = target_temp.min(from_lux);
+                let dim = self
+                    .adaptive_config
+                    .temperature_dim
+                    .filter(|temperature| valid_temperature(*temperature))
+                    .unwrap_or(self.temp_night)
+                    .min(self.temp_day);
+                target_temp = target_temp.min(mix_kelvin(dim, self.temp_day, position));
+            }
+        }
+
+        // The bedtime stage is anchored to the clock, not the sun: melatonin suppression is
+        // about the ~3 h before sleep (Brown et al. 2022), and in December the sun is down
+        // six hours before that. Ramp from wherever the other stages left the screen.
+        if let Some(minutes) = local_minutes_of_day(now) {
+            if let Some(fraction) = self.bedtime_fraction(minutes) {
+                target_temp = target_temp.min(mix_kelvin(target_temp, self.temp_bedtime, fraction));
             }
         }
         let target_brightness = (solar_brightness * adaptive.gamma_brightness).clamp(0.0, 1.0);
@@ -201,6 +237,11 @@ impl NightLight {
         self.elevation_day = config.elevation_day;
         self.elevation_night = config.elevation_night;
         self.brightness_night = config.brightness_night;
+        self.bedtime = config.bedtime.map(|t| t.minutes);
+        self.wake = config.wake.minutes;
+        self.temp_bedtime = config.temperature_bedtime;
+        self.bedtime_lead_mins = config.bedtime_lead_mins;
+        self.bedtime_ramp_mins = config.bedtime_ramp_mins;
         if self.adaptive_config != config.adaptive {
             // Device selection may have changed; re-resolve on next use.
             self.backlight = None;
@@ -286,9 +327,36 @@ impl NightLight {
 
     /// Map solar elevation to color temperature.
     fn elevation_to_temperature(&self, elevation: f64) -> u32 {
-        let t = self.day_fraction(elevation);
-        let temp = self.temp_night as f64 + t * (self.temp_day as f64 - self.temp_night as f64);
-        temp.round() as u32
+        mix_kelvin(self.temp_night, self.temp_day, self.day_fraction(elevation))
+    }
+
+    /// How far into the bedtime ramp the clock is: `0.0` at the start, `1.0` once fully
+    /// warm, `None` outside the stage.
+    ///
+    /// The stage runs from `bedtime - lead` until `wake`, wrapping past midnight; the ramp
+    /// occupies the first `ramp` minutes of it.
+    fn bedtime_fraction(&self, minutes_of_day: u32) -> Option<f64> {
+        const DAY: u32 = 24 * 60;
+        let bedtime = self.bedtime?;
+        if self.bedtime_lead_mins >= DAY
+            || self.wake == bedtime
+            || !valid_temperature(self.temp_bedtime)
+        {
+            return None;
+        }
+        let start = (bedtime + DAY - self.bedtime_lead_mins) % DAY;
+        let length = (self.wake + DAY - start) % DAY;
+        if length == 0 || self.bedtime_ramp_mins > length {
+            return None;
+        }
+        let since_start = (minutes_of_day + DAY - start) % DAY;
+        if since_start >= length {
+            return None;
+        }
+        if self.bedtime_ramp_mins == 0 {
+            return Some(1.0);
+        }
+        Some((since_start as f64 / self.bedtime_ramp_mins as f64).min(1.0))
     }
 
     /// Map solar elevation to brightness, from `brightness_night` up to 1.0.
@@ -299,7 +367,42 @@ impl NightLight {
 }
 
 fn config_enabled(config: &NightLightConfig) -> bool {
-    !config.off && (config.adaptive.on || (config.latitude.is_some() && config.longitude.is_some()))
+    !config.off
+        && (config.adaptive.on
+            || config.bedtime.is_some()
+            || (config.latitude.is_some() && config.longitude.is_some()))
+}
+
+/// Interpolates between two colour temperatures, `from` at `t = 0` and `to` at `t = 1`.
+///
+/// Done in mired (10^6 / K), which is perceptually even; linear kelvin spends most of a
+/// 6500K -> 2700K transition where the eye sees nothing happen and then rushes the warm end.
+fn mix_kelvin(from: u32, to: u32, t: f64) -> u32 {
+    let t = t.clamp(0.0, 1.0);
+    let from = 1e6 / from.max(1) as f64;
+    let to = 1e6 / to.max(1) as f64;
+    (1e6 / (from + t * (to - from))).round() as u32
+}
+
+/// Minutes since local midnight for `now`.
+fn valid_temperature(temperature: u32) -> bool {
+    (1000..=25_000).contains(&temperature)
+}
+
+fn local_minutes_of_day(now: SystemTime) -> Option<u32> {
+    let secs = now
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    // SAFETY: localtime_r only writes into the tm we pass it, and a zeroed tm is valid.
+    let tm = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&secs, &mut tm).is_null() {
+            return None;
+        }
+        tm
+    };
+    Some((tm.tm_hour as u32) * 60 + tm.tm_min as u32)
 }
 
 #[cfg(test)]
@@ -316,6 +419,11 @@ mod tests {
             elevation_day: 3.0,
             elevation_night: -3.0,
             brightness_night: 0.8,
+            bedtime: None,
+            wake: 6 * 60,
+            temp_bedtime: 2700,
+            bedtime_lead_mins: 180,
+            bedtime_ramp_mins: 60,
             adaptive_config: AdaptiveNightLight::default(),
             adaptive: AdaptiveController::default(),
             backlight: None,
@@ -346,9 +454,10 @@ mod tests {
     #[test]
     fn elevation_transition_midpoint() {
         let nl = test_night_light();
-        // At elevation 0° we should be exactly halfway between night and day
+        // At elevation 0° we should be halfway between night and day, in mired:
+        // (1e6/4000 + 1e6/6500) / 2 = 201.9 mired = 4952K.
         let temp = nl.elevation_to_temperature(0.0);
-        assert_eq!(temp, 5250); // (4000 + 6500) / 2 = 5250
+        assert_eq!(temp, 4952);
         let brightness = nl.elevation_to_brightness(0.0);
         assert!((brightness - 0.9).abs() < 0.001); // (0.8 + 1.0) / 2 = 0.9
     }
@@ -360,12 +469,12 @@ mod tests {
         nl.elevation_night = -6.0;
         assert_eq!(nl.elevation_to_temperature(10.0), 6500);
         assert_eq!(nl.elevation_to_temperature(-6.0), 4000);
-        assert_eq!(nl.elevation_to_temperature(2.0), 5250);
+        assert_eq!(nl.elevation_to_temperature(2.0), 4952);
 
         // Reversed by mistake: still a sensible ramp instead of a divide-by-negative.
         nl.elevation_day = -6.0;
         nl.elevation_night = 10.0;
-        assert_eq!(nl.elevation_to_temperature(2.0), 5250);
+        assert_eq!(nl.elevation_to_temperature(2.0), 4952);
         nl.elevation_day = 0.0;
         nl.elevation_night = 0.0;
         assert_eq!(nl.elevation_to_temperature(0.1), 6500);
@@ -495,9 +604,21 @@ mod tests {
             nl.tick(Some(1000.0), Some(6300.0)).unwrap().temperature,
             6300
         );
-        // Dim daylit room, like a laptop by a window with the blinds down: in between.
+        // Dim daylit room, like a laptop by a window with the blinds down: in between,
+        // interpolated in mired so the warm end is not rushed.
         let dim = nl.tick(Some(5.0), Some(6300.0)).unwrap().temperature;
-        assert!((3000..=3600).contains(&dim), "{dim}");
+        assert!((2900..=3600).contains(&dim), "{dim}");
+
+        // temperature-dim moves the warm end: a dark afternoon room stops at 4000K.
+        let mild = NightLightConfig {
+            adaptive: AdaptiveNightLight {
+                temperature_dim: Some(4000),
+                ..config.adaptive.clone()
+            },
+            ..config.clone()
+        };
+        let mut nl = NightLight::new(&mild).unwrap();
+        assert_eq!(nl.tick(Some(0.0), Some(6300.0)).unwrap().temperature, 4000);
 
         // Off by default: the same dim room stays at the room's colour.
         let off = NightLightConfig {
@@ -509,6 +630,92 @@ mod tests {
         };
         let mut nl = NightLight::new(&off).unwrap();
         assert_eq!(nl.tick(Some(5.0), Some(6300.0)).unwrap().temperature, 6300);
+    }
+
+    #[test]
+    fn bedtime_stage_ramps_from_the_current_target_and_wraps_midnight() {
+        let mut nl = test_night_light();
+        nl.latitude = None;
+        nl.longitude = None;
+        nl.bedtime = Some(23 * 60);
+        nl.bedtime_lead_mins = 180;
+        nl.bedtime_ramp_mins = 60;
+        nl.wake = 6 * 60;
+        nl.temp_bedtime = 2000;
+
+        // 19:59 is before the stage; 20:00 starts it; 20:30 is halfway up the ramp.
+        assert_eq!(nl.bedtime_fraction(19 * 60 + 59), None);
+        assert_eq!(nl.bedtime_fraction(20 * 60), Some(0.0));
+        assert_eq!(nl.bedtime_fraction(20 * 60 + 30), Some(0.5));
+        assert_eq!(nl.bedtime_fraction(21 * 60), Some(1.0));
+        // Past midnight it is still on, and it lets go at wake.
+        assert_eq!(nl.bedtime_fraction(2 * 60), Some(1.0));
+        assert_eq!(nl.bedtime_fraction(5 * 60 + 59), Some(1.0));
+        assert_eq!(nl.bedtime_fraction(6 * 60), None);
+        assert_eq!(nl.bedtime_fraction(12 * 60), None);
+
+        // A lead that crosses midnight the other way: bedtime 01:00, lead 3 h -> 22:00.
+        nl.bedtime = Some(60);
+        assert_eq!(nl.bedtime_fraction(21 * 60 + 59), None);
+        assert_eq!(nl.bedtime_fraction(22 * 60), Some(0.0));
+        assert_eq!(nl.bedtime_fraction(23 * 60), Some(1.0));
+
+        // No ramp: fully warm the moment the stage starts.
+        nl.bedtime_ramp_mins = 0;
+        assert_eq!(nl.bedtime_fraction(22 * 60), Some(1.0));
+
+        // Ambiguous or out-of-range schedules fail closed instead of silently aliasing.
+        nl.bedtime = Some(23 * 60);
+        nl.wake = 20 * 60; // start == wake with the three-hour lead
+        assert_eq!(nl.bedtime_fraction(21 * 60), None);
+        nl.wake = 23 * 60; // bedtime == wake is ambiguous too
+        assert_eq!(nl.bedtime_fraction(21 * 60), None);
+        nl.wake = 6 * 60;
+        nl.bedtime_lead_mins = 24 * 60;
+        assert_eq!(nl.bedtime_fraction(23 * 60), None);
+        nl.bedtime_lead_mins = 180;
+        nl.bedtime_ramp_mins = 11 * 60; // longer than the 10-hour active interval
+        assert_eq!(nl.bedtime_fraction(21 * 60), None);
+        nl.bedtime_ramp_mins = 60;
+        nl.temp_bedtime = 0;
+        assert_eq!(nl.bedtime_fraction(21 * 60), None);
+
+        // The ramp starts from the current target, so the screen never jumps.
+        assert_eq!(mix_kelvin(4000, 2000, 0.0), 4000);
+        assert_eq!(mix_kelvin(4000, 2000, 1.0), 2000);
+        // Halfway in mired: (250 + 500) / 2 = 375 mired = 2667K.
+        assert_eq!(mix_kelvin(4000, 2000, 0.5), 2667);
+    }
+
+    #[test]
+    fn bedtime_stage_caps_the_ticked_temperature() {
+        let now = SystemTime::now();
+        let minutes = local_minutes_of_day(now).unwrap();
+        let mut nl = test_night_light();
+        nl.latitude = None;
+        nl.longitude = None;
+        nl.temp_bedtime = 2000;
+        nl.bedtime_lead_mins = 120;
+        nl.bedtime_ramp_mins = 0;
+        // Bedtime an hour from now: we are inside the stage, fully warm.
+        nl.bedtime = Some((minutes + 60) % (24 * 60));
+        nl.wake = (minutes + 120) % (24 * 60);
+        assert_eq!(nl.tick_at(now, None, None).unwrap().temperature, 2000);
+
+        // Bedtime five hours from now: the stage has not started, temperature-day rules.
+        nl.bedtime = Some((minutes + 300) % (24 * 60));
+        nl.wake = (minutes + 420) % (24 * 60);
+        assert_eq!(nl.tick_at(now, None, None).unwrap().temperature, 6500);
+    }
+
+    #[test]
+    fn bedtime_alone_enables_night_light() {
+        let config = NightLightConfig {
+            bedtime: Some(niri_config::night_light::ClockTime::new(23, 0)),
+            ..Default::default()
+        };
+        assert!(NightLight::new(&config).is_some());
+        assert!(NightLight::new(&NightLightConfig::default()).is_none());
     }
 
     #[test]

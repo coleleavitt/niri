@@ -1735,6 +1735,13 @@ mod tests {
                 elevation_day: 3.0,
                 elevation_night: -6.0,
                 brightness_night: 1.0,
+                bedtime: None,
+                wake: ClockTime {
+                    minutes: 360,
+                },
+                temperature_bedtime: 2700,
+                bedtime_lead_mins: 180,
+                bedtime_ramp_mins: 60,
                 adaptive: AdaptiveNightLight {
                     on: false,
                     sensor_path: None,
@@ -1752,6 +1759,7 @@ mod tests {
                     hysteresis: 0.02,
                     manual_hold_secs: 600,
                     temperature_from_lux: false,
+                    temperature_dim: None,
                 },
             },
             overview: Overview {

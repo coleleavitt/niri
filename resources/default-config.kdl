@@ -117,6 +117,12 @@ input {
     // temperature-day 6500
     // temperature-night 3500
     // brightness-night 0.9
+    // Optional clock stage, independent of sunset:
+    // bedtime "23:00"
+    // wake "06:00"
+    // temperature-bedtime 2700
+    // bedtime-lead-mins 180
+    // bedtime-ramp-mins 60
 
     adaptive {
         on
@@ -125,6 +131,8 @@ input {
         // Track the room's measured colour temperature (kelvin) instead of the
         // sun. temperature-day/temperature-night then act as the bounds.
         // temperature-path "$XDG_RUNTIME_DIR/niri-ambient-temp"
+        // Warm end for temperature-from-lux; defaults to temperature-night.
+        // temperature-dim 4000
         //
         // Ignore a sensor file once it goes stale; 0 disables the check.
         // sensor-max-age-secs 300

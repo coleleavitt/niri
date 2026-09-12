@@ -31,6 +31,13 @@ night-light {
     temperature-night 3500
     brightness-night 0.9
 
+    // Optional clock stage. It ramps warmer before bedtime and ends at wake.
+    bedtime "23:00"
+    wake "06:00"
+    temperature-bedtime 2700
+    bedtime-lead-mins 180
+    bedtime-ramp-mins 60
+
     adaptive {
         on
         sensor-path "$XDG_RUNTIME_DIR/niri-ambient-lux"
@@ -267,7 +274,9 @@ By default the screen temperature follows the sun between `temperature-day` and 
 
 With `temperature-path` set, `temperature-day` and `temperature-night` stop being the endpoints of a solar curve and become the bounds the measured value is clamped into. Set them to the warmest and coolest screen you are willing to accept.
 
-Add `temperature-from-lux` inside `adaptive` to also warm the screen as the room gets darker: `low-lux` maps to `temperature-night`, `high-lux` to `temperature-day`, and the result caps the target the same way. A dim room lit by a window still measures as daylight-coloured, but blue light is much more glaring against dark surroundings, so this is usually what you want for eye comfort.
+Add `temperature-from-lux` inside `adaptive` to also warm the screen as the room gets darker: `low-lux` maps to `temperature-dim` (or `temperature-night` when omitted), `high-lux` maps to `temperature-day`, and the result caps the target the same way. A separate `temperature-dim` lets a dark afternoon become only mildly warm while the clock owns the bedtime-warm end.
+
+The optional `bedtime "HH:MM"` stage is independent of the sun and sensors. It starts `bedtime-lead-mins` before bedtime, ramps from the current target to `temperature-bedtime` over `bedtime-ramp-mins`, remains active across midnight, and ends at `wake "HH:MM"`. Defaults are wake `06:00`, bedtime temperature `2700`, lead `180` minutes, and ramp `60` minutes. Omitting `bedtime` disables this stage. A ramp of `0` applies the bedtime temperature immediately. Temperatures must be between 1000K and 25000K, the lead must be less than 24 hours, the ramp must fit before wake, and the computed stage start must differ from wake; invalid combinations fail closed and do not activate the bedtime stage.
 
 If `latitude` and `longitude` are also set, the solar curve acts as a ceiling: the screen is never cooler than the schedule says, but a warm lamp can still pull it warmer. So at night the screen goes warm even under a daylight-coloured bulb, and during the day it follows the room.
 
