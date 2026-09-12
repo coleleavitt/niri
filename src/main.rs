@@ -189,8 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         false,
         true,
         cli.session,
-    )
-    .unwrap();
+    )?;
 
     // Set WAYLAND_DISPLAY for children.
     let socket_name = state.niri.socket_name.as_deref().unwrap();
