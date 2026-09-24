@@ -158,7 +158,7 @@ fn combos() {
 
     // Extra Alt = no action.
     assert_snapshot!(
-        run(c, "+LWIN +LCTL +LALT +LatQ -LatQ -LALT -LCTL -LWIN"),
+        run(c, "+LWIN +LCTL +LALT +LatQ -LALT -LatQ -LCTL -LWIN"),
         @"
     +LWIN 133 XK_Super_L
         surface modifiers: depressed=64, latched=0, locked=0, group=0
@@ -171,11 +171,11 @@ fn combos() {
         surface key pressed: 56
     +AD01  24 XK_q
         surface key pressed: 16
-    -AD01  24 XK_q
-        surface key released: 16
     -LALT  64 XK_Alt_L
         surface modifiers: depressed=68, latched=0, locked=0, group=0
         surface key released: 56
+    -AD01  24 XK_q
+        surface key released: 16
     -LCTL  37 XK_Control_L
         surface modifiers: depressed=64, latched=0, locked=0, group=0
         surface key released: 29
