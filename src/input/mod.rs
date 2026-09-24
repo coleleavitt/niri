@@ -2428,6 +2428,12 @@ impl State {
                     self.niri.queue_redraw_mru_output();
                 }
             }
+            Action::TestAction => {
+                #[cfg(test)]
+                {
+                    self.niri.test_action_count += 1;
+                }
+            }
         }
     }
 
