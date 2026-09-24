@@ -131,6 +131,7 @@ fn combos() {
     let c = "
     binds {
         Mod+Ctrl+Q { close-window; }
+        Mod+Ctrl+W { close-window; }
     }
     ";
 
@@ -147,6 +148,31 @@ fn combos() {
     +AD01  24 XK_q
         niri test-action
     -AD01  24 XK_q
+    -LCTL  37 XK_Control_L
+        surface modifiers: depressed=64, latched=0, locked=0, group=0
+        surface key released: 29
+    -LWIN 133 XK_Super_L
+        surface modifiers: depressed=0, latched=0, locked=0, group=0
+        surface key released: 125
+    "
+    );
+
+    // Two actions interleaved.
+    assert_snapshot!(
+        run(c, "+LWIN +LCTL +LatQ +LatW -LatQ -LatW -LCTL -LWIN"),
+        @"
+    +LWIN 133 XK_Super_L
+        surface modifiers: depressed=64, latched=0, locked=0, group=0
+        surface key pressed: 125
+    +LCTL  37 XK_Control_L
+        surface modifiers: depressed=68, latched=0, locked=0, group=0
+        surface key pressed: 29
+    +AD01  24 XK_q
+        niri test-action
+    +AD02  25 XK_w
+        niri test-action
+    -AD01  24 XK_q
+    -AD02  25 XK_w
     -LCTL  37 XK_Control_L
         surface modifiers: depressed=64, latched=0, locked=0, group=0
         surface key released: 29
@@ -281,6 +307,29 @@ fn combos() {
     -AD01  24 XK_q
     "
     );
+
+    // Modifiers after trigger key don't trigger the action.
+    assert_snapshot!(
+        run(c, "+LWIN +LatQ +LCTL -LCTL -LatQ -LWIN"),
+        @"
+    +LWIN 133 XK_Super_L
+        surface modifiers: depressed=64, latched=0, locked=0, group=0
+        surface key pressed: 125
+    +AD01  24 XK_q
+        surface key pressed: 16
+    +LCTL  37 XK_Control_L
+        surface modifiers: depressed=68, latched=0, locked=0, group=0
+        surface key pressed: 29
+    -LCTL  37 XK_Control_L
+        surface modifiers: depressed=64, latched=0, locked=0, group=0
+        surface key released: 29
+    -AD01  24 XK_q
+        surface key released: 16
+    -LWIN 133 XK_Super_L
+        surface modifiers: depressed=0, latched=0, locked=0, group=0
+        surface key released: 125
+    "
+    );
 }
 
 #[test]
@@ -288,6 +337,7 @@ fn inhibiting() {
     let config = "
     binds {
         Q { close-window; }
+        U allow-inhibiting=false { close-window; }
     }
     ";
 
@@ -304,6 +354,16 @@ fn inhibiting() {
         surface key pressed: 16
     -AD01  24 XK_q
         surface key released: 16
+    "
+    );
+
+    // allow-inhibiting=false still triggers.
+    assert_snapshot!(
+        run_f(&mut f, id, &surface, "+LatU -LatU"),
+        @"
+    +AD07  30 XK_u
+        niri test-action
+    -AD07  30 XK_u
     "
     );
 
