@@ -152,7 +152,7 @@ fn socket_dir() -> PathBuf {
         .unwrap_or_else(env::temp_dir)
 }
 
-fn on_new_ipc_client(state: &mut State, stream: UnixStream) {
+pub(crate) fn on_new_ipc_client(state: &mut State, stream: UnixStream) {
     let _span = tracy_client::span!("on_new_ipc_client");
     trace!("new IPC client connected");
 
@@ -456,6 +456,20 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             let state = ctx.event_stream_state.borrow();
             let casts = state.casts.casts.values().cloned().collect();
             Response::Casts(casts)
+        }
+        Request::WindowGeometry { id } => {
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                let niri = &state.niri;
+                let id = id.or_else(|| niri.layout.focus().map(|mapped| mapped.id().get()));
+                let _ = tx.send_blocking((id, id.and_then(|id| niri.window_geometry(id))));
+            });
+            let result = rx.recv().await;
+            let (id, geometry) =
+                result.map_err(|_| String::from("error getting window geometry"))?;
+            let id = id.ok_or_else(|| String::from("no window is focused"))?;
+            let geometry = geometry.ok_or_else(|| format!("window with id {id} not found"))?;
+            Response::WindowGeometry(geometry)
         }
     };
 

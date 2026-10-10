@@ -3929,3 +3929,258 @@ proptest! {
         check_ops_with_options(options, ops);
     }
 }
+
+fn window_geometry_params(id: usize, w: i32, h: i32) -> TestWindowParams {
+    TestWindowParams {
+        bbox: Rectangle::from_size(Size::from((w, h))),
+        ..TestWindowParams::new(id)
+    }
+}
+
+fn window_geometry_layout(ops: impl IntoIterator<Item = Op>) -> Layout<TestWindow> {
+    let options = Options {
+        layout: niri_config::Layout {
+            gaps: 0.,
+            border: niri_config::Border {
+                off: false,
+                width: 4.,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    check_ops_with_options(options, ops)
+}
+
+fn rect(x: f64, y: f64, w: f64, h: f64) -> Rectangle<f64, Logical> {
+    Rectangle::new(Point::from((x, y)), Size::from((w, h)))
+}
+
+#[test]
+fn window_render_geometry_tiled_scrolled_view() {
+    let mut layout = window_geometry_layout([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: window_geometry_params(0, 692, 192),
+        },
+        Op::AddWindow {
+            params: window_geometry_params(1, 692, 192),
+        },
+        Op::AddWindow {
+            params: window_geometry_params(2, 692, 192),
+        },
+        Op::CompleteAnimations,
+    ]);
+
+    // Three 700-wide tiles; the view is scrolled to fit the last one on the 1280-wide output.
+    let geo = layout.window_render_geometry(&2).unwrap();
+    assert_eq!(geo.output.unwrap().name(), "output1");
+    assert!(!geo.is_floating);
+    assert!(!geo.animating);
+    assert_eq!(geo.tile_rect, Some(rect(580., 0., 700., 200.)));
+    assert_eq!(geo.window_rect, Some(rect(584., 4., 692., 192.)));
+
+    let geo = layout.window_render_geometry(&0).unwrap();
+    assert_eq!(geo.tile_rect, Some(rect(-820., 0., 700., 200.)));
+
+    // The view offset animation moves the windows and reports them as animating.
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::FocusColumnFirst,
+            Op::AdvanceAnimations { msec_delta: 50 },
+        ],
+    );
+    let geo = layout.window_render_geometry(&0).unwrap();
+    assert!(geo.animating);
+    let x = geo.tile_rect.unwrap().loc.x;
+    assert!(-820. < x && x < 0., "{x}");
+
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    let geo = layout.window_render_geometry(&0).unwrap();
+    assert!(!geo.animating);
+    assert_eq!(geo.tile_rect, Some(rect(0., 0., 700., 200.)));
+}
+
+#[test]
+fn window_render_geometry_floating() {
+    let layout = window_geometry_layout([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: window_geometry_params(0, 692, 192),
+        },
+        Op::AddWindow {
+            params: TestWindowParams {
+                is_floating: true,
+                ..window_geometry_params(1, 192, 92)
+            },
+        },
+        Op::MoveFloatingWindow {
+            id: Some(1),
+            x: PositionChange::SetFixed(300.),
+            y: PositionChange::SetFixed(250.),
+            animate: false,
+        },
+        Op::CompleteAnimations,
+    ]);
+
+    let geo = layout.window_render_geometry(&1).unwrap();
+    assert!(geo.is_floating);
+    assert!(!geo.animating);
+    assert_eq!(geo.tile_rect, Some(rect(300., 250., 200., 100.)));
+    assert_eq!(geo.window_rect, Some(rect(304., 254., 192., 92.)));
+}
+
+#[test]
+fn window_render_geometry_inactive_workspace() {
+    let mut layout = window_geometry_layout([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: window_geometry_params(0, 692, 192),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AdvanceAnimations { msec_delta: 50 },
+    ]);
+
+    // Mid-switch, the workspace is partially visible and moving.
+    let geo = layout.window_render_geometry(&0).unwrap();
+    assert!(geo.animating);
+    let tile_rect = geo.tile_rect.unwrap();
+    assert!(-720. < tile_rect.loc.y && tile_rect.loc.y < 0.);
+
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    let geo = layout.window_render_geometry(&0).unwrap();
+    assert!(geo.workspace_id.is_some());
+    assert_eq!(geo.output.unwrap().name(), "output1");
+    assert!(!geo.animating);
+    assert_eq!(geo.tile_rect, None);
+    assert_eq!(geo.window_rect, None);
+}
+
+#[test]
+fn window_render_geometry_hidden_tab() {
+    let layout = window_geometry_layout([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: window_geometry_params(0, 692, 192),
+        },
+        Op::AddWindow {
+            params: window_geometry_params(1, 692, 192),
+        },
+        Op::ConsumeOrExpelWindowLeft { id: None },
+        Op::ToggleColumnTabbedDisplay,
+        Op::FocusWindowUp,
+        Op::CompleteAnimations,
+    ]);
+
+    assert!(layout
+        .window_render_geometry(&0)
+        .unwrap()
+        .tile_rect
+        .is_some());
+    assert_eq!(layout.window_render_geometry(&1).unwrap().tile_rect, None);
+}
+
+#[test]
+fn window_render_geometry_overview() {
+    let mut layout = window_geometry_layout([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: window_geometry_params(0, 692, 192),
+        },
+        Op::CompleteAnimations,
+        Op::ToggleOverview,
+    ]);
+
+    let geo = layout.window_render_geometry(&0).unwrap();
+    assert!(geo.animating);
+    assert_eq!(geo.tile_rect, None);
+
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    let geo = layout.window_render_geometry(&0).unwrap();
+    assert!(!geo.animating);
+    assert_eq!(geo.tile_rect, None);
+}
+
+#[test]
+fn window_render_geometry_no_outputs() {
+    let layout = window_geometry_layout([Op::AddWindow {
+        params: window_geometry_params(0, 692, 192),
+    }]);
+
+    let geo = layout.window_render_geometry(&0).unwrap();
+    assert_eq!(geo.output, None);
+    assert!(geo.workspace_id.is_some());
+    assert_eq!(geo.tile_rect, None);
+
+    assert_eq!(layout.window_render_geometry(&1), None);
+}
+
+#[test]
+fn window_render_geometry_interactive_move() {
+    let mut layout = window_geometry_layout([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: window_geometry_params(0, 692, 192),
+        },
+        Op::CompleteAnimations,
+        Op::InteractiveMoveBegin {
+            window: 0,
+            output_idx: 1,
+            px: 100.,
+            py: 100.,
+        },
+        Op::InteractiveMoveUpdate {
+            window: 0,
+            dx: 1000.,
+            dy: 0.,
+            output_idx: 1,
+            px: 600.,
+            py: 100.,
+        },
+    ]);
+
+    let geo = layout.window_render_geometry(&0).unwrap();
+    assert_eq!(geo.workspace_id, None);
+    assert!(geo.animating);
+    let before = geo.tile_rect.unwrap();
+
+    // The moved tile follows the pointer.
+    check_ops_on_layout(
+        &mut layout,
+        [Op::InteractiveMoveUpdate {
+            window: 0,
+            dx: 100.,
+            dy: 50.,
+            output_idx: 1,
+            px: 700.,
+            py: 150.,
+        }],
+    );
+    let after = layout
+        .window_render_geometry(&0)
+        .unwrap()
+        .tile_rect
+        .unwrap();
+    assert_eq!(after.loc - before.loc, Point::from((100., 50.)));
+    assert_eq!(after.size, before.size);
+}
+
+#[test]
+fn window_render_geometry_fullscreen() {
+    let layout = window_geometry_layout([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: window_geometry_params(0, 692, 192),
+        },
+        Op::FullscreenWindow(0),
+        Op::Communicate(0),
+        Op::CompleteAnimations,
+    ]);
+
+    // Fullscreen tiles have no border and cover the whole output.
+    let geo = layout.window_render_geometry(&0).unwrap();
+    assert_eq!(geo.tile_rect, Some(rect(0., 0., 1280., 720.)));
+    assert_eq!(geo.window_rect, Some(rect(0., 0., 1280., 720.)));
+}

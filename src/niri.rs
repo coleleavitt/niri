@@ -3338,6 +3338,62 @@ impl Niri {
         Some((output, pos_within_output))
     }
 
+    /// Returns the current on-screen geometry of the window with this IPC id.
+    ///
+    /// Rectangles are in the global logical coordinate space and follow what is rendered right
+    /// now, including animations.
+    pub fn window_geometry(&self, id: u64) -> Option<niri_ipc::WindowGeometry> {
+        let (_, mapped) = self.layout.windows().find(|(_, m)| m.id().get() == id)?;
+        let geo = self.layout.window_render_geometry(&mapped.window)?;
+
+        let output_geo = geo
+            .output
+            .as_ref()
+            .and_then(|output| self.global_space.output_geometry(output))
+            .map(|geo| geo.to_f64());
+        let to_global = |rect: Rectangle<f64, Logical>| {
+            let offset = output_geo.map_or_else(Point::default, |geo| geo.loc);
+            Rectangle::new(rect.loc + offset, rect.size)
+        };
+        let tile_rect = geo.tile_rect.map(to_global);
+        let window_rect = geo.window_rect.map(to_global);
+        let fully_visible = window_rect
+            .zip(output_geo)
+            .is_some_and(|(rect, output_geo)| output_geo.contains_rect(rect));
+        let visible_rect = if fully_visible {
+            window_rect
+        } else {
+            window_rect
+                .zip(output_geo)
+                .and_then(|(rect, output_geo)| rect.intersection(output_geo))
+        };
+
+        let to_ipc = |rect: Rectangle<f64, Logical>| niri_ipc::LogicalRect {
+            x: rect.loc.x,
+            y: rect.loc.y,
+            width: rect.size.w,
+            height: rect.size.h,
+        };
+
+        Some(niri_ipc::WindowGeometry {
+            id,
+            output: geo.output.as_ref().map(|output| output.name()),
+            scale: geo
+                .output
+                .as_ref()
+                .map(|output| output.current_scale().fractional_scale()),
+            workspace_id: geo.workspace_id.map(|id| id.get()),
+            is_floating: geo.is_floating,
+            on_screen: tile_rect.is_some(),
+            tile_rect: tile_rect.map(to_ipc),
+            window_rect: window_rect.map(to_ipc),
+            visible_rect: visible_rect.map(to_ipc),
+            fully_visible,
+            animating: geo.animating,
+            overview_open: self.layout.is_overview_open(),
+        })
+    }
+
     fn is_inside_hot_corner(&self, output: &Output, pos: Point<f64, Logical>) -> bool {
         let config = self.config.borrow();
         let hot_corners = output

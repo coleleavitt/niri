@@ -28,6 +28,25 @@ You can get raw events from `niri msg --json event-stream`, or by connecting to 
 
 You can find the full list of events along with documentation [here](https://niri-wm.github.io/niri/niri_ipc/enum.Event.html).
 
+### Window Geometry
+
+<sup>Since: next release</sup>
+
+`niri msg window-geometry` prints where a window is on screen right now, in the same global logical coordinates as the output positions from `niri msg outputs`.
+Pass `--id` to pick a window by its id; otherwise niri uses the focused window.
+Unlike the `layout` in `niri msg windows`, this works for tiled windows too, and it follows animations such as view scrolling and workspace switches.
+
+```sh
+$ niri msg --json window-geometry --id 12
+{"id":12,"output":"DP-2","scale":1.5,"workspace_id":3,"is_floating":false,"on_screen":true,"tile_rect":{"x":2560.0,"y":16.0,"width":1052.0,"height":1408.0},"window_rect":{"x":2560.0,"y":16.0,"width":1052.0,"height":1408.0},"visible_rect":{"x":2560.0,"y":16.0,"width":1052.0,"height":1408.0},"fully_visible":true,"animating":false,"overview_open":false}
+```
+
+- `tile_rect` includes borders, `window_rect` is the window itself, and `visible_rect` is the part of `window_rect` inside the output.
+- The rectangles are `null` when the window is not shown at normal scale: its workspace is not visible, it is a hidden tab, it is a floating window hidden behind a fullscreen window, or the overview is open or animating.
+- `animating` is `true` while something that can move or resize the window is in progress. Query again once it becomes `false` before you rely on the position.
+
+The geometry is computed on request rather than sent through the event stream, since it changes on every animation frame.
+
 ### Programmatic Access
 
 `niri msg --json` is a thin wrapper over writing and reading to a socket.

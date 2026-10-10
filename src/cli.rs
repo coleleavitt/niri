@@ -109,6 +109,14 @@ pub enum Msg {
     OverviewState,
     /// List screencasts.
     Casts,
+    /// Print the current on-screen geometry of a window.
+    WindowGeometry {
+        /// Id of the window to query.
+        ///
+        /// If not specified, uses the focused window.
+        #[arg(long)]
+        id: Option<u64>,
+    },
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]

@@ -7,8 +7,9 @@ use anyhow::{anyhow, bail, Context};
 use niri_config::OutputName;
 use niri_ipc::socket::Socket;
 use niri_ipc::{
-    Action, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, Mode, Output,
-    OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowLayout,
+    Action, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, LogicalRect, Mode,
+    Output, OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowGeometry,
+    WindowLayout,
 };
 use serde_json::json;
 
@@ -59,6 +60,7 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         Msg::RequestError => Request::ReturnError,
         Msg::OverviewState => Request::OverviewState,
         Msg::Casts => Request::Casts,
+        Msg::WindowGeometry { id } => Request::WindowGeometry { id: *id },
     };
 
     let mut socket = Socket::connect().context("error connecting to the niri socket")?;
@@ -565,6 +567,20 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                 println!();
             }
         }
+        Msg::WindowGeometry { .. } => {
+            let Response::WindowGeometry(geometry) = response else {
+                bail!("unexpected response: expected WindowGeometry, got {response:?}");
+            };
+
+            if json {
+                let geometry =
+                    serde_json::to_string(&geometry).context("error formatting response")?;
+                println!("{geometry}");
+                return Ok(());
+            }
+
+            print_window_geometry(&geometry);
+        }
     }
 
     Ok(())
@@ -831,6 +847,61 @@ fn print_cast(cast: &Cast) {
     if let Some(node_id) = cast.pw_node_id {
         println!("  PipeWire node ID: {node_id}");
     }
+}
+
+fn print_window_geometry(geometry: &WindowGeometry) {
+    let WindowGeometry {
+        id,
+        output,
+        scale,
+        workspace_id,
+        is_floating,
+        on_screen,
+        tile_rect,
+        window_rect,
+        visible_rect,
+        fully_visible,
+        animating,
+        overview_open,
+    } = geometry;
+
+    let fmt_yes_no = |b: bool| if b { "yes" } else { "no" };
+    let fmt_rect = |rect: &Option<LogicalRect>| match rect {
+        Some(LogicalRect {
+            x,
+            y,
+            width,
+            height,
+        }) => format!(
+            "{} x {} at ({}, {})",
+            fmt_rounded(*width),
+            fmt_rounded(*height),
+            fmt_rounded(*x),
+            fmt_rounded(*y)
+        ),
+        None => String::from("(none)"),
+    };
+
+    println!("Window ID {id}:");
+    match (output, scale) {
+        (Some(output), Some(scale)) => println!("  Output: \"{output}\" (scale {scale})"),
+        (Some(output), None) => println!("  Output: \"{output}\""),
+        (None, _) => println!("  Output: (none)"),
+    }
+    match workspace_id {
+        Some(ws_id) => println!("  Workspace ID: {ws_id}"),
+        None => println!("  Workspace ID: (none)"),
+    }
+    println!("  Is floating: {}", fmt_yes_no(*is_floating));
+    println!("  On screen: {}", fmt_yes_no(*on_screen));
+    println!("  Fully visible: {}", fmt_yes_no(*fully_visible));
+    println!("  Animating: {}", fmt_yes_no(*animating));
+    println!("  Overview open: {}", fmt_yes_no(*overview_open));
+    println!();
+    println!("  Logical geometry (global, width x height at (x, y)):");
+    println!("    Tile: {}", fmt_rect(tile_rect));
+    println!("    Window: {}", fmt_rect(window_rect));
+    println!("    Visible part of window: {}", fmt_rect(visible_rect));
 }
 
 fn fmt_rounded(x: f64) -> String {
