@@ -457,6 +457,23 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             let casts = state.casts.casts.values().cloned().collect();
             Response::Casts(casts)
         }
+        Request::CaptureWindow {
+            id,
+            path,
+            show_pointer,
+        } => {
+            validate_path(&path)?;
+
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                if let Err(err) = state.capture_window(id, path, show_pointer, tx.clone()) {
+                    let _ = tx.send_blocking(Err(err));
+                }
+            });
+            let result = rx.recv().await;
+            let capture = result.map_err(|_| String::from("error capturing window"))??;
+            Response::WindowCaptured(capture)
+        }
     };
 
     Ok(response)
@@ -469,11 +486,7 @@ fn validate_action(action: &Action) -> Result<(), String> {
     | Action::LoadConfigFile { path } = action
     {
         if let Some(path) = path {
-            // Relative paths are resolved against the niri compositor's working directory, which
-            // is almost certainly not what you want.
-            if !Path::new(path).is_absolute() {
-                return Err(format!("path must be absolute: {path}"));
-            }
+            validate_path(path)?;
         }
     }
 
@@ -484,6 +497,15 @@ fn validate_action(action: &Action) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_path(path: &str) -> Result<(), String> {
+    // Relative paths are resolved against the niri compositor's working directory, which is
+    // almost certainly not what you want.
+    if !Path::new(path).is_absolute() {
+        return Err(format!("path must be absolute: {path}"));
+    }
     Ok(())
 }
 
@@ -957,6 +979,15 @@ mod tests {
         assert_eq!(
             event_stream_buffer_size(initial_events_len),
             initial_events_len
+        );
+    }
+
+    #[test]
+    fn capture_window_requires_absolute_path() {
+        assert!(validate_path("/tmp/window.png").is_ok());
+        assert_eq!(
+            validate_path("window.png"),
+            Err(String::from("path must be absolute: window.png"))
         );
     }
 

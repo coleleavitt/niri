@@ -587,6 +587,14 @@ pub enum LockRenderState {
     Locked,
 }
 
+/// A window rendered alone.
+struct WindowScreenshot {
+    size: Size<i32, Physical>,
+    pixels: Vec<u8>,
+    /// Window geometry inside the image.
+    window_rect: Rectangle<i32, Physical>,
+}
+
 // Not related to the one in Smithay.
 //
 // This state keeps track of when a surface last received a frame callback.
@@ -2159,7 +2167,12 @@ impl State {
         self.niri.output_management_state.notify_changes(new_config);
     }
 
-    pub fn open_screenshot_ui(&mut self, show_pointer: bool, path: Option<String>) {
+    pub fn open_screenshot_ui(
+        &mut self,
+        show_pointer: bool,
+        copy_to_clipboard: bool,
+        path: Option<String>,
+    ) {
         if self.niri.is_locked() || self.niri.screenshot_ui.is_open() {
             return;
         }
@@ -2202,9 +2215,14 @@ impl State {
         }
 
         self.backend.with_primary_renderer(|renderer| {
-            self.niri
-                .screenshot_ui
-                .open(renderer, screenshots, default_output, show_pointer, path)
+            self.niri.screenshot_ui.open(
+                renderer,
+                screenshots,
+                default_output,
+                show_pointer,
+                copy_to_clipboard,
+                path,
+            )
         });
 
         self.niri
@@ -2230,15 +2248,28 @@ impl State {
     }
 
     pub fn confirm_screenshot(&mut self, write_to_disk: bool) {
-        let ScreenshotUi::Open { path, .. } = &mut self.niri.screenshot_ui else {
+        let ScreenshotUi::Open {
+            path,
+            copy_to_clipboard,
+            ..
+        } = &mut self.niri.screenshot_ui
+        else {
             return;
         };
         let path = path.take();
+        // Confirming without writing to disk is the explicit "copy" action in the UI.
+        let copy_to_clipboard = *copy_to_clipboard || !write_to_disk;
 
         self.backend.with_primary_renderer(|renderer| {
             match self.niri.screenshot_ui.capture(renderer) {
                 Ok((size, pixels)) => {
-                    if let Err(err) = self.niri.save_screenshot(size, pixels, write_to_disk, path) {
+                    if let Err(err) = self.niri.save_screenshot(
+                        size,
+                        pixels,
+                        write_to_disk,
+                        copy_to_clipboard,
+                        path,
+                    ) {
                         warn!("error saving screenshot: {err:?}");
                     }
                 }
@@ -2253,6 +2284,42 @@ impl State {
             .cursor_manager
             .set_cursor_image(CursorImageStatus::default_named());
         self.niri.queue_redraw_all();
+    }
+
+    /// Captures a window to a PNG file, see `Niri::capture_window()`.
+    ///
+    /// On success, the capture result is sent to `tx` once the file is written. On error, nothing
+    /// is sent to `tx`.
+    pub fn capture_window(
+        &mut self,
+        id: Option<u64>,
+        path: String,
+        show_pointer: bool,
+        tx: async_channel::Sender<Result<niri_ipc::WindowCapture, String>>,
+    ) -> Result<(), String> {
+        let (mapped, output) = match id {
+            None => self
+                .niri
+                .layout
+                .focus_with_output()
+                .ok_or_else(|| String::from("no focused window"))?,
+            Some(id) => {
+                let mut windows = self.niri.layout.windows();
+                match windows.find(|(_, m)| m.id().get() == id) {
+                    Some((Some(monitor), mapped)) => (mapped, monitor.output()),
+                    Some((None, _)) => return Err(format!("window {id} is not on an output")),
+                    None => return Err(format!("no window with id {id}")),
+                }
+            }
+        };
+
+        self.backend
+            .with_primary_renderer(|renderer| {
+                self.niri
+                    .capture_window(renderer, output, mapped, path, show_pointer, tx)
+            })
+            .ok_or_else(|| String::from("no renderer available"))?
+            .map_err(|err| format!("error capturing window: {err:#}"))
     }
 
     pub fn store_unmap_snapshot(&mut self, window: &Window, output: Option<&Output>) {
@@ -5825,6 +5892,7 @@ impl Niri {
         output: &Output,
         write_to_disk: bool,
         include_pointer: bool,
+        copy_to_clipboard: bool,
         path: Option<String>,
     ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot");
@@ -5852,10 +5920,11 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot(size, pixels, write_to_disk, path)
+        self.save_screenshot(size, pixels, write_to_disk, copy_to_clipboard, path)
             .context("error saving screenshot")
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn screenshot_window(
         &self,
         renderer: &mut GlesRenderer,
@@ -5863,10 +5932,75 @@ impl Niri {
         mapped: &Mapped,
         write_to_disk: bool,
         show_pointer: bool,
+        copy_to_clipboard: bool,
         path: Option<String>,
     ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot_window");
 
+        let shot = self.render_window_screenshot(renderer, output, mapped, show_pointer)?;
+        self.save_screenshot(
+            shot.size,
+            shot.pixels,
+            write_to_disk,
+            copy_to_clipboard,
+            path,
+        )
+        .context("error saving screenshot")
+    }
+
+    /// Renders a window like `screenshot_window()` and writes the PNG only to `path`, without
+    /// touching the clipboard.
+    ///
+    /// The result is sent to `tx` once the file is fully written.
+    pub fn capture_window(
+        &self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        mapped: &Mapped,
+        path: String,
+        show_pointer: bool,
+        tx: async_channel::Sender<Result<niri_ipc::WindowCapture, String>>,
+    ) -> anyhow::Result<()> {
+        let _span = tracy_client::span!("Niri::capture_window");
+
+        let WindowScreenshot {
+            size,
+            pixels,
+            window_rect,
+        } = self.render_window_screenshot(renderer, output, mapped, show_pointer)?;
+
+        let capture = niri_ipc::WindowCapture {
+            id: mapped.id().get(),
+            path,
+            width_px: size.w as u32,
+            height_px: size.h as u32,
+            scale: output.current_scale().fractional_scale(),
+            window_offset_px: (window_rect.loc.x, window_rect.loc.y),
+            window_size_px: (window_rect.size.w, window_rect.size.h),
+        };
+
+        thread::spawn(move || {
+            let mut buf = vec![];
+            let res = write_png_rgba8(&mut buf, size.w as u32, size.h as u32, &pixels)
+                .context("error encoding image")
+                .and_then(|()| {
+                    std::fs::write(&capture.path, buf)
+                        .with_context(|| format!("error writing {}", capture.path))
+                });
+            let _ = tx.send_blocking(res.map(|()| capture).map_err(|err| format!("{err:#}")));
+        });
+
+        Ok(())
+    }
+
+    /// Renders a window and its popups alone.
+    fn render_window_screenshot(
+        &self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        mapped: &Mapped,
+        show_pointer: bool,
+    ) -> anyhow::Result<WindowScreenshot> {
         let scale = Scale::from(output.current_scale().fractional_scale());
         let alpha =
             if mapped.sizing_mode().is_fullscreen() || mapped.is_ignoring_opacity_window_rule() {
@@ -5920,8 +6054,18 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot(geo.size, pixels, write_to_disk, path)
-            .context("error saving screenshot")
+        let window_geo = mapped
+            .window
+            .geometry()
+            .to_f64()
+            .to_physical_precise_round(scale);
+        let window_rect = Rectangle::new(window_geo.loc - geo.loc, window_geo.size);
+
+        Ok(WindowScreenshot {
+            size: geo.size,
+            pixels,
+            window_rect,
+        })
     }
 
     pub fn save_screenshot(
@@ -5929,6 +6073,7 @@ impl Niri {
         size: Size<i32, Physical>,
         pixels: Vec<u8>,
         write_to_disk: bool,
+        copy_to_clipboard: bool,
         path_arg: Option<String>,
     ) -> anyhow::Result<()> {
         let path = write_to_disk
@@ -5948,20 +6093,23 @@ impl Niri {
 
         // Prepare to set the encoded image as our clipboard selection. This must be done from the
         // main thread.
-        let (tx, rx) = calloop::channel::sync_channel::<Arc<[u8]>>(1);
-        self.event_loop
-            .insert_source(rx, move |event, _, state| match event {
-                calloop::channel::Event::Msg(buf) => {
-                    set_data_device_selection(
-                        &state.niri.display_handle,
-                        &state.niri.seat,
-                        vec![String::from("image/png")],
-                        SelectionData::bytes(vec![String::from("image/png")], buf.clone()),
-                    );
-                }
-                calloop::channel::Event::Closed => (),
-            })
-            .unwrap();
+        let tx = copy_to_clipboard.then(|| {
+            let (tx, rx) = calloop::channel::sync_channel::<Arc<[u8]>>(1);
+            self.event_loop
+                .insert_source(rx, move |event, _, state| match event {
+                    calloop::channel::Event::Msg(buf) => {
+                        set_data_device_selection(
+                            &state.niri.display_handle,
+                            &state.niri.seat,
+                            vec![String::from("image/png")],
+                            SelectionData::bytes(vec![String::from("image/png")], buf.clone()),
+                        );
+                    }
+                    calloop::channel::Event::Closed => (),
+                })
+                .unwrap();
+            tx
+        });
 
         // Prepare to send screenshot completion event back to main thread.
         let (event_tx, event_rx) = calloop::channel::sync_channel::<Option<String>>(1);
@@ -5985,7 +6133,9 @@ impl Niri {
             }
 
             let buf: Arc<[u8]> = Arc::from(buf.into_boxed_slice());
-            let _ = tx.send(buf.clone());
+            if let Some(tx) = tx {
+                let _ = tx.send(buf.clone());
+            }
 
             let mut image_path = None;
 

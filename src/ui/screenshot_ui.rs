@@ -60,6 +60,7 @@ pub enum ScreenshotUi {
         output_data: HashMap<Output, OutputData>,
         button: Button,
         show_pointer: bool,
+        copy_to_clipboard: bool,
         open_anim: Animation,
         clock: Clock,
         config: Rc<RefCell<Config>>,
@@ -142,6 +143,7 @@ impl ScreenshotUi {
         screenshots: HashMap<Output, [OutputScreenshot; 3]>,
         default_output: Output,
         show_pointer: bool,
+        copy_to_clipboard: bool,
         path: Option<String>,
     ) -> bool {
         if screenshots.is_empty() {
@@ -234,6 +236,7 @@ impl ScreenshotUi {
             output_data,
             button: Button::Up,
             show_pointer,
+            copy_to_clipboard,
             open_anim,
             clock: clock.clone(),
             config: config.clone(),
