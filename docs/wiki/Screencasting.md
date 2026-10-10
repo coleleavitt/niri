@@ -7,7 +7,9 @@ You can screencast both monitors and individual windows.
 In order to use it, you need a working D-Bus session, pipewire, `xdg-desktop-portal-gnome`, and [running niri as a session](./Getting-Started.md) (i.e. through `niri-session` or from a display manager).
 On widely used distros this should all "just work".
 
-Alternatively, you can use tools that rely on the `wlr-screencopy` protocol, which niri also supports.
+Alternatively, you can use tools that rely on the `wlr-screencopy` or `ext-image-copy-capture` protocols, which niri also supports.
+`ext-image-copy-capture` can capture both monitors and individual windows (through `ext-foreign-toplevel-list` handles, whose identifier is the niri window ID).
+For example, `grim -T 42 window.png` captures the window with ID 42 (see `niri msg windows`).
 
 There are several features in niri designed for screencasting.
 Let's take a look!
