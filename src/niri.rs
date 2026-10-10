@@ -113,7 +113,6 @@ use smithay::wayland::socket::ListeningSocketSource;
 use smithay::wayland::tablet_manager::TabletManagerState;
 use smithay::wayland::text_input::TextInputManagerState;
 use smithay::wayland::viewporter::ViewporterState;
-use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
 use smithay::wayland::xdg_activation::XdgActivationState;
 use smithay::wayland::xdg_foreign::XdgForeignState;
 use wayland_server::protocol::wl_output::WlOutput;
@@ -160,6 +159,7 @@ use crate::protocols::image_copy_capture::{
 use crate::protocols::mutter_x11_interop::MutterX11InteropManagerState;
 use crate::protocols::output_management::OutputManagementManagerState;
 use crate::protocols::screencopy::{Screencopy, ScreencopyBuffer, ScreencopyManagerState};
+use crate::protocols::virtual_keyboard::VirtualKeyboardManagerState;
 use crate::protocols::virtual_pointer::VirtualPointerManagerState;
 use crate::render_helpers::blur::BlurOptions;
 use crate::render_helpers::debug::push_opaque_regions;
@@ -191,6 +191,7 @@ use crate::utils::{
     logical_output, make_screenshot_path, output_matches_name, output_size, panel_orientation,
     send_scale_transform, write_png_rgba8, xwayland,
 };
+use crate::virtual_input::VirtualInputTracker;
 use crate::window::mapped::MappedId;
 use crate::window::{InitialConfigureState, Mapped, ResolvedWindowRules, Unmapped, WindowRef};
 
@@ -325,6 +326,7 @@ pub struct Niri {
     pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
     pub virtual_keyboard_state: VirtualKeyboardManagerState,
     pub virtual_pointer_state: VirtualPointerManagerState,
+    pub virtual_input: VirtualInputTracker,
     pub pointer_gestures_state: PointerGesturesState,
     pub relative_pointer_state: RelativePointerManagerState,
     pub pointer_constraints_state: PointerConstraintsState,
@@ -922,6 +924,9 @@ impl State {
         self.refresh_ipc_outputs();
         self.ipc_refresh_layout();
         self.ipc_refresh_keyboard_layout_index();
+
+        self.niri.virtual_input.refresh();
+        self.ipc_refresh_virtual_input();
 
         // Needs to be called after updating the keyboard focus.
         #[cfg(feature = "dbus")]
@@ -1710,6 +1715,10 @@ impl State {
 
         if config.xwayland_satellite != old_config.xwayland_satellite {
             xwls_changed = true;
+        }
+
+        if config.virtual_input_indicator != old_config.virtual_input_indicator {
+            self.niri.virtual_input.indicator_config_changed();
         }
 
         *old_config = config;
@@ -2648,10 +2657,19 @@ impl Niri {
             InputMethodManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
         let keyboard_shortcuts_inhibit_state =
             KeyboardShortcutsInhibitState::new::<State>(&display_handle);
-        let virtual_keyboard_state =
-            VirtualKeyboardManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
+        let virtual_input = VirtualInputTracker::new();
+        let virtual_input_allowed = {
+            let blocked = virtual_input.blocked_flag();
+            move |client: &Client| {
+                !blocked.load(Ordering::Relaxed) && client_is_unrestricted(client)
+            }
+        };
+        let virtual_keyboard_state = VirtualKeyboardManagerState::new::<State, _>(
+            &display_handle,
+            virtual_input_allowed.clone(),
+        );
         let virtual_pointer_state =
-            VirtualPointerManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
+            VirtualPointerManagerState::new::<State, _>(&display_handle, virtual_input_allowed);
         let foreign_toplevel_state =
             ForeignToplevelManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
         let ext_workspace_state =
@@ -2860,6 +2878,7 @@ impl Niri {
             keyboard_shortcuts_inhibit_state,
             virtual_keyboard_state,
             virtual_pointer_state,
+            virtual_input,
             shm_state,
             output_manager_state,
             dmabuf_state,
@@ -4673,6 +4692,12 @@ impl Niri {
         // The pointer goes on the top.
         if include_pointer && self.pointer_visibility.is_visible() {
             self.render_pointer(ctx.renderer, output, &mut |elem| push(elem.into()));
+        }
+
+        if ctx.target == RenderTarget::Output {
+            for elem in self.virtual_input_indicator_elements(output) {
+                push(elem.into());
+            }
         }
 
         // Next, the screen transition texture.

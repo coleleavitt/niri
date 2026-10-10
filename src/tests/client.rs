@@ -41,6 +41,10 @@ use smithay::reexports::wayland_protocols_wlr::layer_shell::v1::client::zwlr_lay
 use smithay::reexports::wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1::{
     self, ZwlrLayerSurfaceV1,
 };
+use smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
+use smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::client::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1;
+use smithay::reexports::wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1;
+use smithay::reexports::wayland_protocols_wlr::virtual_pointer::v1::client::zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1;
 use wayland_backend::client::Backend;
 use wayland_client::globals::Global;
 use wayland_client::protocol::wl_buffer::{self, WlBuffer};
@@ -87,6 +91,8 @@ pub struct State {
     /// Surface with pointer focus and the serial of its enter event.
     pub pointer_focus: Option<(WlSurface, u32)>,
     pub pointer_location: (f64, f64),
+    pub virtual_pointer_manager: Option<ZwlrVirtualPointerManagerV1>,
+    pub virtual_keyboard_manager: Option<ZwpVirtualKeyboardManagerV1>,
 
     pub windows: Vec<Window>,
     pub layers: Vec<LayerSurface>,
@@ -241,6 +247,8 @@ impl Client {
             pointer: None,
             pointer_focus: None,
             pointer_location: (0., 0.),
+            virtual_pointer_manager: None,
+            virtual_keyboard_manager: None,
             windows: Vec::new(),
             layers: Vec::new(),
             foreign_toplevels: Vec::new(),
@@ -356,6 +364,16 @@ impl Client {
         let pointer_warp = self.state.pointer_warp.as_ref().unwrap();
         let pointer = self.state.pointer.as_ref().unwrap();
         pointer_warp.warp_pointer(surface, pointer, x, y, serial);
+    }
+
+    pub fn create_virtual_pointer(&mut self) -> ZwlrVirtualPointerV1 {
+        let manager = self.state.virtual_pointer_manager.as_ref().unwrap();
+        manager.create_virtual_pointer(self.state.seat.as_ref(), &self.qh, ())
+    }
+
+    pub fn create_virtual_keyboard(&mut self) -> ZwpVirtualKeyboardV1 {
+        let manager = self.state.virtual_keyboard_manager.as_ref().unwrap();
+        manager.create_virtual_keyboard(self.state.seat.as_ref().unwrap(), &self.qh, ())
     }
 
     pub fn output(&mut self, name: &str) -> WlOutput {
@@ -649,6 +667,12 @@ impl Dispatch<WlRegistry, ()> for State {
                 } else if interface == WpPointerWarpV1::interface().name {
                     let version = min(version, WpPointerWarpV1::interface().version);
                     state.pointer_warp = Some(registry.bind(name, version, qh, ()));
+                } else if interface == ZwlrVirtualPointerManagerV1::interface().name {
+                    let version = min(version, ZwlrVirtualPointerManagerV1::interface().version);
+                    state.virtual_pointer_manager = Some(registry.bind(name, version, qh, ()));
+                } else if interface == ZwpVirtualKeyboardManagerV1::interface().name {
+                    let version = min(version, ZwpVirtualKeyboardManagerV1::interface().version);
+                    state.virtual_keyboard_manager = Some(registry.bind(name, version, qh, ()));
                 } else if interface == WlOutput::interface().name {
                     let version = min(version, WlOutput::interface().version);
                     let output = registry.bind(name, version, qh, ());
@@ -1091,6 +1115,58 @@ impl Dispatch<WpPointerWarpV1, ()> for State {
         _state: &mut Self,
         _proxy: &WpPointerWarpV1,
         _event: <WpPointerWarpV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        unreachable!()
+    }
+}
+
+impl Dispatch<ZwlrVirtualPointerManagerV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwlrVirtualPointerManagerV1,
+        _event: <ZwlrVirtualPointerManagerV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        unreachable!()
+    }
+}
+
+impl Dispatch<ZwlrVirtualPointerV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwlrVirtualPointerV1,
+        _event: <ZwlrVirtualPointerV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        unreachable!()
+    }
+}
+
+impl Dispatch<ZwpVirtualKeyboardManagerV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwpVirtualKeyboardManagerV1,
+        _event: <ZwpVirtualKeyboardManagerV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        unreachable!()
+    }
+}
+
+impl Dispatch<ZwpVirtualKeyboardV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwpVirtualKeyboardV1,
+        _event: <ZwpVirtualKeyboardV1 as wayland_client::Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,

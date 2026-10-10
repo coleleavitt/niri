@@ -143,6 +143,8 @@ pub enum Msg {
         #[arg(long)]
         show_pointer: bool,
     },
+    /// Print the synthetic (virtual) input state.
+    VirtualInputState,
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]

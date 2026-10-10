@@ -6,6 +6,7 @@ pub mod image_copy_capture;
 pub mod mutter_x11_interop;
 pub mod output_management;
 pub mod screencopy;
+pub mod virtual_keyboard;
 pub mod virtual_pointer;
 
 pub mod raw;
