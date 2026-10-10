@@ -32,6 +32,7 @@
 //! don't want an unassuming workspace to end up on it.
 
 use std::collections::HashMap;
+use std::iter::zip;
 use std::mem;
 use std::rc::Rc;
 use std::time::Duration;
@@ -337,6 +338,25 @@ pub trait LayoutElement {
     fn interactive_resize_data(&self) -> Option<InteractiveResizeData>;
 
     fn on_commit(&mut self, serial: Serial);
+}
+
+/// Where a window is currently rendered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowRenderGeometry {
+    /// Output the window is on.
+    pub output: Option<Output>,
+    /// Workspace the window is on, `None` during an interactive move.
+    pub workspace_id: Option<WorkspaceId>,
+    pub is_floating: bool,
+    /// Rendered tile rectangle in output-local logical coordinates.
+    ///
+    /// `None` if the window is not rendered at normal scale on its output: its workspace is not
+    /// visible, it is a hidden tab or hidden floating window, or the overview is shown.
+    pub tile_rect: Option<Rectangle<f64, Logical>>,
+    /// Rendered window geometry rectangle in output-local logical coordinates.
+    pub window_rect: Option<Rectangle<f64, Logical>>,
+    /// Whether an animation that can move or resize the window is in progress.
+    pub animating: bool,
 }
 
 #[derive(Debug)]
@@ -5008,6 +5028,74 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn is_overview_open(&self) -> bool {
         self.overview_open
+    }
+
+    /// Returns where the window is currently rendered, including ongoing animations.
+    pub fn window_render_geometry(&self, window: &W::Id) -> Option<WindowRenderGeometry> {
+        let overview_shown = self.overview_progress.is_some();
+        let overview_animating = self
+            .overview_progress
+            .as_ref()
+            .is_some_and(|p| !matches!(p, OverviewProgress::Open));
+
+        let rects = |tile: &Tile<W>, tile_pos: Point<f64, Logical>| {
+            let tile_rect = Rectangle::new(tile_pos, tile.animated_tile_size());
+            let window_rect =
+                Rectangle::new(tile_pos + tile.window_loc(), tile.animated_window_size());
+            (tile_rect, window_rect)
+        };
+
+        if let Some(move_) = self.interactive_move.as_ref().and_then(|x| x.moving()) {
+            if move_.tile.window().id() == window {
+                let rects =
+                    (!overview_shown).then(|| rects(&move_.tile, move_.tile_render_location(1.)));
+                return Some(WindowRenderGeometry {
+                    output: Some(move_.output.clone()),
+                    workspace_id: None,
+                    is_floating: move_.is_floating,
+                    tile_rect: rects.map(|r| r.0),
+                    window_rect: rects.map(|r| r.1),
+                    animating: true,
+                });
+            }
+        }
+
+        let (mon, ws, ws_geo) = match &self.monitor_set {
+            MonitorSet::Normal { monitors, .. } => monitors.iter().find_map(|mon| {
+                zip(&mon.workspaces, mon.workspaces_render_geo())
+                    .find(|(ws, _)| ws.has_window(window))
+                    .map(|(ws, geo)| (Some(mon), ws, Some(geo)))
+            })?,
+            MonitorSet::NoOutputs { workspaces } => {
+                let ws = workspaces.iter().find(|ws| ws.has_window(window))?;
+                (None, ws, None)
+            }
+        };
+
+        let (tile, tile_pos, tile_visible) = ws
+            .tiles_with_render_positions()
+            .find(|(tile, _, _)| tile.window().id() == window)?;
+
+        let rects = mon
+            .zip(ws_geo)
+            .filter(|(mon, geo)| {
+                let output_geo = Rectangle::from_size(mon.view_size());
+                tile_visible && !overview_shown && geo.intersection(output_geo).is_some()
+            })
+            .map(|(_, geo)| rects(tile, geo.loc + tile_pos));
+
+        let animating = overview_animating
+            || mon.is_some_and(|mon| mon.workspace_switch.is_some())
+            || ws.is_window_animating(window);
+
+        Some(WindowRenderGeometry {
+            output: mon.map(|mon| mon.output.clone()),
+            workspace_id: Some(ws.id()),
+            is_floating: ws.is_floating(window),
+            tile_rect: rects.map(|r| r.0),
+            window_rect: rects.map(|r| r.1),
+            animating,
+        })
     }
 }
 

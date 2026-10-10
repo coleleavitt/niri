@@ -393,6 +393,20 @@ binds {
 }
 ```
 
+<sup>Since: next release</sup> You can keep the screenshot out of the clipboard with the `copy-to-clipboard=false` property.
+The screenshot is then only saved to disk.
+
+```kdl
+binds {
+    Mod+Print { screenshot-window copy-to-clipboard=false; }
+}
+```
+
+In the interactive screenshot UI, <kbd>Ctrl</kbd><kbd>C</kbd> still copies to the clipboard.
+
+For scripts, `niri msg capture-window --path /abs/path.png` writes a single window to a file without touching the clipboard.
+See the [IPC page](./IPC.md#capturing-a-window).
+
 #### `toggle-keyboard-shortcuts-inhibit`
 
 <sup>Since: 25.02</sup>

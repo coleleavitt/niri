@@ -7,8 +7,9 @@ use anyhow::{anyhow, bail, Context};
 use niri_config::OutputName;
 use niri_ipc::socket::Socket;
 use niri_ipc::{
-    Action, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, Mode, Output,
-    OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowLayout,
+    Action, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, LogicalRect, Mode,
+    Output, OutputConfigChanged, Overview, PointHit, Request, Response, Transform, Window,
+    WindowCapture, WindowGeometry, WindowLayout,
 };
 use serde_json::json;
 
@@ -27,6 +28,9 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         if let Some(path) = path {
             ensure_absolute_path(path).context("error making the path absolute")?;
         }
+    }
+    if let Msg::CaptureWindow { path, .. } = &mut msg {
+        ensure_absolute_path(path).context("error making the path absolute")?;
     }
 
     let wait_for_screenshot = matches!(
@@ -59,6 +63,17 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         Msg::RequestError => Request::ReturnError,
         Msg::OverviewState => Request::OverviewState,
         Msg::Casts => Request::Casts,
+        Msg::WindowGeometry { id } => Request::WindowGeometry { id: *id },
+        Msg::WindowAt { x, y } => Request::WindowAt { x: *x, y: *y },
+        Msg::CaptureWindow {
+            path,
+            id,
+            show_pointer,
+        } => Request::CaptureWindow {
+            id: *id,
+            path: path.clone(),
+            show_pointer: *show_pointer,
+        },
     };
 
     let mut socket = Socket::connect().context("error connecting to the niri socket")?;
@@ -565,6 +580,59 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                 println!();
             }
         }
+        Msg::WindowGeometry { .. } => {
+            let Response::WindowGeometry(geometry) = response else {
+                bail!("unexpected response: expected WindowGeometry, got {response:?}");
+            };
+
+            if json {
+                let geometry =
+                    serde_json::to_string(&geometry).context("error formatting response")?;
+                println!("{geometry}");
+                return Ok(());
+            }
+
+            print_window_geometry(&geometry);
+        }
+        Msg::WindowAt { .. } => {
+            let Response::WindowAt(hit) = response else {
+                bail!("unexpected response: expected WindowAt, got {response:?}");
+            };
+
+            if json {
+                let hit = serde_json::to_string(&hit).context("error formatting response")?;
+                println!("{hit}");
+                return Ok(());
+            }
+
+            print_point_hit(&hit);
+        }
+        Msg::CaptureWindow { .. } => {
+            let Response::WindowCaptured(capture) = response else {
+                bail!("unexpected response: expected WindowCaptured, got {response:?}");
+            };
+
+            if json {
+                let capture =
+                    serde_json::to_string(&capture).context("error formatting response")?;
+                println!("{capture}");
+                return Ok(());
+            }
+
+            let WindowCapture {
+                id,
+                path,
+                width_px,
+                height_px,
+                scale,
+                window_offset_px: (x, y),
+                window_size_px: (w, h),
+            } = capture;
+            println!("Captured window {id} to {path}");
+            println!("  Image size: {width_px} × {height_px} px");
+            println!("  Scale: {}", fmt_rounded(scale));
+            println!("  Window geometry in image: {w} × {h} px at ({x}, {y})");
+        }
     }
 
     Ok(())
@@ -833,6 +901,93 @@ fn print_cast(cast: &Cast) {
     }
 }
 
+fn print_window_geometry(geometry: &WindowGeometry) {
+    let WindowGeometry {
+        id,
+        output,
+        scale,
+        workspace_id,
+        is_floating,
+        on_screen,
+        tile_rect,
+        window_rect,
+        visible_rect,
+        fully_visible,
+        animating,
+        overview_open,
+    } = geometry;
+
+    let fmt_yes_no = |b: bool| if b { "yes" } else { "no" };
+    let fmt_rect = |rect: &Option<LogicalRect>| match rect {
+        Some(LogicalRect {
+            x,
+            y,
+            width,
+            height,
+        }) => format!(
+            "{} x {} at ({}, {})",
+            fmt_rounded(*width),
+            fmt_rounded(*height),
+            fmt_rounded(*x),
+            fmt_rounded(*y)
+        ),
+        None => String::from("(none)"),
+    };
+
+    println!("Window ID {id}:");
+    match (output, scale) {
+        (Some(output), Some(scale)) => println!("  Output: \"{output}\" (scale {scale})"),
+        (Some(output), None) => println!("  Output: \"{output}\""),
+        (None, _) => println!("  Output: (none)"),
+    }
+    match workspace_id {
+        Some(ws_id) => println!("  Workspace ID: {ws_id}"),
+        None => println!("  Workspace ID: (none)"),
+    }
+    println!("  Is floating: {}", fmt_yes_no(*is_floating));
+    println!("  On screen: {}", fmt_yes_no(*on_screen));
+    println!("  Fully visible: {}", fmt_yes_no(*fully_visible));
+    println!("  Animating: {}", fmt_yes_no(*animating));
+    println!("  Overview open: {}", fmt_yes_no(*overview_open));
+    println!();
+    println!("  Logical geometry (global, width x height at (x, y)):");
+    println!("    Tile: {}", fmt_rect(tile_rect));
+    println!("    Window: {}", fmt_rect(window_rect));
+    println!("    Visible part of window: {}", fmt_rect(visible_rect));
+}
+
+fn print_point_hit(hit: &PointHit) {
+    let Some(output) = &hit.output else {
+        println!("No output at this point.");
+        return;
+    };
+    println!("Output: \"{output}\"");
+
+    if let Some(layer) = &hit.layer {
+        println!(
+            "Layer surface: \"{}\" on the {:?} layer",
+            layer.namespace, layer.layer
+        );
+    }
+
+    if let Some(id) = hit.window_id {
+        let input = if hit.is_input { "" } else { " (activate only)" };
+        println!("Window ID: {id}{input}");
+    }
+
+    if let Some((x, y)) = hit.window_local {
+        println!(
+            "Window-local position: {}, {}",
+            fmt_rounded(x),
+            fmt_rounded(y)
+        );
+    }
+
+    if hit.window_id.is_none() && hit.layer.is_none() {
+        println!("Nothing under this point.");
+    }
+}
+
 fn fmt_rounded(x: f64) -> String {
     let r = x.round();
     if (r - x).abs() <= 0.005 {
@@ -876,17 +1031,20 @@ mod tests {
     fn screenshot_actions_wait_for_capture() {
         assert!(action_waits_for_screenshot(&Action::Screenshot {
             show_pointer: true,
+            copy_to_clipboard: true,
             path: None,
         }));
         assert!(action_waits_for_screenshot(&Action::ScreenshotScreen {
             write_to_disk: true,
             show_pointer: true,
+            copy_to_clipboard: true,
             path: None,
         }));
         assert!(action_waits_for_screenshot(&Action::ScreenshotWindow {
             id: None,
             write_to_disk: true,
             show_pointer: false,
+            copy_to_clipboard: false,
             path: None,
         }));
         assert!(!action_waits_for_screenshot(&Action::ToggleOverview {}));

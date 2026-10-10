@@ -119,6 +119,39 @@ pub enum Request {
     OverviewState,
     /// Request information about screencasts.
     Casts,
+    /// Request the current on-screen geometry of a window.
+    WindowGeometry {
+        /// Id of the window to query.
+        ///
+        /// If `None`, uses the focused window.
+        id: Option<u64>,
+    },
+    /// Hit test at a point using the compositor's input hit-testing.
+    ///
+    /// Reports what a pointer click at this point would hit: a window, a layer-shell surface, or
+    /// nothing.
+    WindowAt {
+        /// X coordinate in the global logical coordinate space.
+        x: f64,
+        /// Y coordinate in the global logical coordinate space.
+        y: f64,
+    },
+    /// Render a window alone and write it to a PNG file.
+    ///
+    /// Works for tiled, offscreen and covered windows. Never touches the clipboard. The reply is
+    /// sent only after the file has been fully written.
+    CaptureWindow {
+        /// Id of the window to capture.
+        ///
+        /// If `None`, uses the focused window.
+        id: Option<u64>,
+        /// Absolute path to write the PNG to.
+        path: String,
+        /// Whether to include the mouse pointer.
+        ///
+        /// The pointer will be included only if the window is currently receiving pointer input.
+        show_pointer: bool,
+    },
 }
 
 /// Reply from niri to client.
@@ -165,6 +198,12 @@ pub enum Response {
     OverviewState(Overview),
     /// Information about screencasts.
     Casts(Vec<Cast>),
+    /// Current on-screen geometry of a window.
+    WindowGeometry(WindowGeometry),
+    /// Result of a hit test.
+    WindowAt(PointHit),
+    /// Information about a captured window.
+    WindowCaptured(WindowCapture),
 }
 
 /// Overview information.
@@ -173,6 +212,59 @@ pub enum Response {
 pub struct Overview {
     /// Whether the overview is currently open.
     pub is_open: bool,
+}
+
+/// Result of a hit test at a point.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct PointHit {
+    /// Name of the output under the point.
+    pub output: Option<String>,
+    /// Id of the topmost window under the point.
+    pub window_id: Option<u64>,
+    /// The point relative to the window geometry origin, in logical pixels.
+    ///
+    /// Set only when `is_input` is `true` for a window hit.
+    pub window_local: Option<(f64, f64)>,
+    /// Whether a client surface under the point receives pointer input.
+    ///
+    /// For a window, `false` means the point only activates it, for example on the focus ring,
+    /// border, tab indicator, or when the overview is open.
+    pub is_input: bool,
+    /// The layer-shell surface on top under the point.
+    pub layer: Option<LayerHit>,
+}
+
+/// A layer-shell surface found by a hit test.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct LayerHit {
+    /// Namespace provided by the layer-shell client.
+    pub namespace: String,
+    /// Layer that the surface is on.
+    pub layer: Layer,
+}
+
+/// Window capture written to disk.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct WindowCapture {
+    /// Id of the captured window.
+    pub id: u64,
+    /// Path the PNG was written to.
+    pub path: String,
+    /// Width of the PNG in physical pixels.
+    pub width_px: u32,
+    /// Height of the PNG in physical pixels.
+    pub height_px: u32,
+    /// Output scale used for rendering.
+    pub scale: f64,
+    /// Top-left of the window geometry inside the PNG, in physical pixels.
+    ///
+    /// Popups and client-side decorations can make the PNG larger than the window geometry.
+    pub window_offset_px: (i32, i32),
+    /// Size of the window geometry inside the PNG, in physical pixels.
+    pub window_size_px: (i32, i32),
 }
 
 /// Color picked from the screen.
@@ -228,6 +320,11 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = true))]
         show_pointer: bool,
 
+        /// Whether to copy the screenshot to the clipboard.
+        #[cfg_attr(feature = "clap", arg(short = 'c', long, action = clap::ArgAction::Set, default_value_t = true))]
+        #[serde(default = "default_true")]
+        copy_to_clipboard: bool,
+
         /// Path to save the screenshot to.
         ///
         /// The path must be absolute, otherwise an error is returned.
@@ -238,7 +335,7 @@ pub enum Action {
     },
     /// Screenshot the focused screen.
     ScreenshotScreen {
-        /// Write the screenshot to disk in addition to putting it in your clipboard.
+        /// Write the screenshot to disk.
         ///
         /// The screenshot is saved according to the `screenshot-path` config setting.
         #[cfg_attr(feature = "clap", arg(short = 'd', long, action = clap::ArgAction::Set, default_value_t = true))]
@@ -247,6 +344,11 @@ pub enum Action {
         /// Whether to include the mouse pointer in the screenshot.
         #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = true))]
         show_pointer: bool,
+
+        /// Whether to copy the screenshot to the clipboard.
+        #[cfg_attr(feature = "clap", arg(short = 'c', long, action = clap::ArgAction::Set, default_value_t = true))]
+        #[serde(default = "default_true")]
+        copy_to_clipboard: bool,
 
         /// Path to save the screenshot to.
         ///
@@ -264,7 +366,7 @@ pub enum Action {
         /// If `None`, uses the focused window.
         #[cfg_attr(feature = "clap", arg(long))]
         id: Option<u64>,
-        /// Write the screenshot to disk in addition to putting it in your clipboard.
+        /// Write the screenshot to disk.
         ///
         /// The screenshot is saved according to the `screenshot-path` config setting.
         #[cfg_attr(feature = "clap", arg(short = 'd', long, action = clap::ArgAction::Set, default_value_t = true))]
@@ -276,6 +378,11 @@ pub enum Action {
         /// (usually this means the pointer is on top of the window).
         #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = false))]
         show_pointer: bool,
+
+        /// Whether to copy the screenshot to the clipboard.
+        #[cfg_attr(feature = "clap", arg(short = 'c', long, action = clap::ArgAction::Set, default_value_t = true))]
+        #[serde(default = "default_true")]
+        copy_to_clipboard: bool,
 
         /// Path to save the screenshot to.
         ///
@@ -1428,6 +1535,73 @@ pub struct WindowLayout {
     pub window_offset_in_tile: (f64, f64),
 }
 
+/// Rectangle in logical coordinates.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct LogicalRect {
+    /// X coordinate of the top-left corner.
+    pub x: f64,
+    /// Y coordinate of the top-left corner.
+    pub y: f64,
+    /// Width.
+    pub width: f64,
+    /// Height.
+    pub height: f64,
+}
+
+/// Current on-screen geometry of a window.
+///
+/// Unlike [`WindowLayout`], this is computed on request from the positions niri is rendering
+/// right now, including animations, and works for both tiled and floating windows.
+///
+/// All rectangles are in the global logical coordinate space, the same one as
+/// [`LogicalOutput::x`] and [`LogicalOutput::y`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct WindowGeometry {
+    /// Id of the window.
+    pub id: u64,
+    /// Name of the output the window is on.
+    ///
+    /// `None` if there are no outputs.
+    pub output: Option<String>,
+    /// Scale of the output the window is on.
+    pub scale: Option<f64>,
+    /// Id of the workspace the window is on.
+    ///
+    /// `None` while the window is being moved with the mouse.
+    pub workspace_id: Option<u64>,
+    /// Whether the window is floating.
+    pub is_floating: bool,
+    /// Whether the window is currently rendered at normal scale on its output.
+    ///
+    /// This is `false` when its workspace is not visible, when it is a hidden tab or a floating
+    /// window hidden behind a fullscreen window, and while the overview is open or animating.
+    pub on_screen: bool,
+    /// Current rendered tile rectangle, including borders.
+    ///
+    /// `None` if the window is not on screen. The rectangle may extend past the output.
+    pub tile_rect: Option<LogicalRect>,
+    /// Current rendered rectangle of the window's visual geometry, without borders.
+    ///
+    /// `None` if the window is not on screen.
+    pub window_rect: Option<LogicalRect>,
+    /// [`Self::window_rect`] clipped to the output.
+    ///
+    /// `None` if the window is not on screen or is fully outside the output.
+    pub visible_rect: Option<LogicalRect>,
+    /// Whether the whole window geometry is inside the output.
+    pub fully_visible: bool,
+    /// Whether an animation that can move or resize the window is in progress.
+    ///
+    /// This includes view scrolling, workspace switches and the overview transition (both
+    /// animated and gesture-driven), window movement, resizing and opening, and interactive
+    /// moves. Geometry reported while this is `true` will likely change soon.
+    pub animating: bool,
+    /// Whether the overview is open.
+    pub overview_open: bool,
+}
+
 /// Output configuration change result.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
@@ -1741,6 +1915,10 @@ pub enum Event {
         /// Stream ID of the stopped screencast.
         stream_id: u64,
     },
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl From<Duration> for Timestamp {
@@ -2165,5 +2343,58 @@ mod tests {
         );
         assert!("-".parse::<PositionChange>().is_err());
         assert!("10% ".parse::<PositionChange>().is_err());
+    }
+
+    #[test]
+    fn screenshot_copy_to_clipboard_defaults_to_true() {
+        let action: Action = serde_json::from_str(
+            r#"{"ScreenshotWindow":{"id":null,"write_to_disk":true,"show_pointer":false,"path":null}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            action,
+            Action::ScreenshotWindow {
+                copy_to_clipboard: true,
+                ..
+            }
+        ));
+
+        let action: Action = serde_json::from_str(
+            r#"{"ScreenshotScreen":{"write_to_disk":true,"show_pointer":true,"copy_to_clipboard":false,"path":null}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            action,
+            Action::ScreenshotScreen {
+                copy_to_clipboard: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn capture_window_json_shape() {
+        let request: Request = serde_json::from_str(
+            r#"{"CaptureWindow":{"id":3,"path":"/tmp/w.png","show_pointer":false}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            Request::CaptureWindow { id: Some(3), ref path, show_pointer: false } if path == "/tmp/w.png"
+        ));
+
+        let response = Response::WindowCaptured(WindowCapture {
+            id: 3,
+            path: String::from("/tmp/w.png"),
+            width_px: 120,
+            height_px: 90,
+            scale: 1.5,
+            window_offset_px: (10, 20),
+            window_size_px: (100, 50),
+        });
+        assert_eq!(
+            serde_json::to_string(&response).unwrap(),
+            r#"{"WindowCaptured":{"id":3,"path":"/tmp/w.png","width_px":120,"height_px":90,"scale":1.5,"window_offset_px":[10,20],"window_size_px":[100,50]}}"#,
+        );
     }
 }
