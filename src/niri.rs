@@ -6071,6 +6071,11 @@ impl Niri {
         session: &mut ImageCopyCaptureSession,
         params: ImageCaptureParams,
     ) {
+        // Output captures show the lock screen; window captures wait until the session unlocks.
+        if self.is_locked() && matches!(session.target, ImageCaptureTarget::Window(_)) {
+            return;
+        }
+
         let Some(frame) = session.pending_frame.take() else {
             return;
         };
