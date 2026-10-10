@@ -119,6 +119,13 @@ pub enum Request {
     OverviewState,
     /// Request information about screencasts.
     Casts,
+    /// Request the current on-screen geometry of a window.
+    WindowGeometry {
+        /// Id of the window to query.
+        ///
+        /// If `None`, uses the focused window.
+        id: Option<u64>,
+    },
 }
 
 /// Reply from niri to client.
@@ -165,6 +172,8 @@ pub enum Response {
     OverviewState(Overview),
     /// Information about screencasts.
     Casts(Vec<Cast>),
+    /// Current on-screen geometry of a window.
+    WindowGeometry(WindowGeometry),
 }
 
 /// Overview information.
@@ -1426,6 +1435,73 @@ pub struct WindowLayout {
     /// the distance from the corner of the black backdrop to the corner of the (centered) window
     /// contents.
     pub window_offset_in_tile: (f64, f64),
+}
+
+/// Rectangle in logical coordinates.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct LogicalRect {
+    /// X coordinate of the top-left corner.
+    pub x: f64,
+    /// Y coordinate of the top-left corner.
+    pub y: f64,
+    /// Width.
+    pub width: f64,
+    /// Height.
+    pub height: f64,
+}
+
+/// Current on-screen geometry of a window.
+///
+/// Unlike [`WindowLayout`], this is computed on request from the positions niri is rendering
+/// right now, including animations, and works for both tiled and floating windows.
+///
+/// All rectangles are in the global logical coordinate space, the same one as
+/// [`LogicalOutput::x`] and [`LogicalOutput::y`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct WindowGeometry {
+    /// Id of the window.
+    pub id: u64,
+    /// Name of the output the window is on.
+    ///
+    /// `None` if there are no outputs.
+    pub output: Option<String>,
+    /// Scale of the output the window is on.
+    pub scale: Option<f64>,
+    /// Id of the workspace the window is on.
+    ///
+    /// `None` while the window is being moved with the mouse.
+    pub workspace_id: Option<u64>,
+    /// Whether the window is floating.
+    pub is_floating: bool,
+    /// Whether the window is currently rendered at normal scale on its output.
+    ///
+    /// This is `false` when its workspace is not visible, when it is a hidden tab or a floating
+    /// window hidden behind a fullscreen window, and while the overview is open or animating.
+    pub on_screen: bool,
+    /// Current rendered tile rectangle, including borders.
+    ///
+    /// `None` if the window is not on screen. The rectangle may extend past the output.
+    pub tile_rect: Option<LogicalRect>,
+    /// Current rendered rectangle of the window's visual geometry, without borders.
+    ///
+    /// `None` if the window is not on screen.
+    pub window_rect: Option<LogicalRect>,
+    /// [`Self::window_rect`] clipped to the output.
+    ///
+    /// `None` if the window is not on screen or is fully outside the output.
+    pub visible_rect: Option<LogicalRect>,
+    /// Whether the whole window geometry is inside the output.
+    pub fully_visible: bool,
+    /// Whether an animation that can move or resize the window is in progress.
+    ///
+    /// This includes view scrolling, workspace switches and the overview transition (both
+    /// animated and gesture-driven), window movement, resizing and opening, and interactive
+    /// moves. Geometry reported while this is `true` will likely change soon.
+    pub animating: bool,
+    /// Whether the overview is open.
+    pub overview_open: bool,
 }
 
 /// Output configuration change result.
