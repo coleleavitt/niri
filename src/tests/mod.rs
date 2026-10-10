@@ -8,6 +8,7 @@ mod animations;
 mod capture_window;
 mod floating;
 mod fullscreen;
+mod image_copy_capture;
 mod ipc;
 mod layer_shell;
 mod pointer_warp;

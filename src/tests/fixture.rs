@@ -96,10 +96,19 @@ impl Fixture {
     }
 
     pub fn add_client(&mut self) -> ClientId {
+        self.insert_client(false)
+    }
+
+    /// Adds a client that is restricted like one connecting through a security context.
+    pub fn add_restricted_client(&mut self) -> ClientId {
+        self.insert_client(true)
+    }
+
+    fn insert_client(&mut self, restricted: bool) -> ClientId {
         let (sock1, sock2) = UnixStream::pair().unwrap();
         self.niri().insert_client(NewClient {
             client: sock1,
-            restricted: false,
+            restricted,
             credentials_unknown: false,
         });
 
