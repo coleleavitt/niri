@@ -119,6 +119,8 @@ pub enum Request {
     OverviewState,
     /// Request information about screencasts.
     Casts,
+    /// Request information about synthetic (virtual) input.
+    VirtualInputState,
 }
 
 /// Reply from niri to client.
@@ -165,6 +167,8 @@ pub enum Response {
     OverviewState(Overview),
     /// Information about screencasts.
     Casts(Vec<Cast>),
+    /// Information about synthetic (virtual) input.
+    VirtualInputState(VirtualInput),
 }
 
 /// Overview information.
@@ -173,6 +177,33 @@ pub enum Response {
 pub struct Overview {
     /// Whether the overview is currently open.
     pub is_open: bool,
+}
+
+/// Synthetic input information.
+///
+/// Synthetic input comes from wlr-virtual-pointer, virtual-keyboard and the
+/// org.gnome.Mutter.RemoteDesktop D-Bus interface (including its EIS connections).
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct VirtualInput {
+    /// Whether synthetic input produced an event recently.
+    ///
+    /// Becomes `false` after the `virtual-input-indicator` `idle-timeout-ms` passes without new
+    /// synthetic input events, or right away after the virtual input is revoked.
+    pub active: bool,
+    /// Whether new synthetic input is refused (see [`Action::ToggleVirtualInputBlocked`]).
+    pub blocked: bool,
+    /// Number of live virtual pointers.
+    pub virtual_pointers: u32,
+    /// Number of connected clients that created a virtual keyboard.
+    pub virtual_keyboard_clients: u32,
+    /// Number of RemoteDesktop sessions.
+    pub remote_desktop_sessions: u32,
+    /// When synthetic input last produced an event.
+    ///
+    /// The timestamp comes from the monotonic clock. Creating a virtual keyboard counts as an
+    /// event, because events from virtual keyboards are not visible to niri.
+    pub last_activity: Option<Timestamp>,
 }
 
 /// Color picked from the screen.
@@ -945,6 +976,15 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(long))]
         path: Option<String>,
     },
+    /// Revoke all current synthetic input.
+    ///
+    /// Virtual pointers stop working, clients with virtual keyboards are disconnected, and
+    /// RemoteDesktop sessions are closed.
+    RevokeVirtualInput {},
+    /// Toggle refusing new synthetic input.
+    ///
+    /// Blocking also revokes all current synthetic input.
+    ToggleVirtualInputBlocked {},
 }
 
 /// Change in window or column size.
@@ -1740,6 +1780,14 @@ pub enum Event {
     CastStopped {
         /// Stream ID of the stopped screencast.
         stream_id: u64,
+    },
+    /// Synthetic input became active or idle, was blocked or unblocked, or its sources changed.
+    ///
+    /// This event is not sent for every synthetic input event, so `last_activity` here may be
+    /// older than the one from [`Request::VirtualInputState`].
+    VirtualInputChanged {
+        /// The new synthetic input state.
+        virtual_input: VirtualInput,
     },
 }
 

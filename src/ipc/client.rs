@@ -1,6 +1,7 @@
 use std::io::ErrorKind;
 use std::iter::Peekable;
 use std::path::Path;
+use std::time::Duration;
 use std::{env, slice};
 
 use anyhow::{anyhow, bail, Context};
@@ -8,12 +9,13 @@ use niri_config::OutputName;
 use niri_ipc::socket::Socket;
 use niri_ipc::{
     Action, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, Mode, Output,
-    OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowLayout,
+    OutputConfigChanged, Overview, Request, Response, Transform, VirtualInput, Window,
+    WindowLayout,
 };
 use serde_json::json;
 
 use crate::cli::Msg;
-use crate::utils::version;
+use crate::utils::{get_monotonic_time, version};
 
 pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
     // For actions taking paths, prepend the niri CLI's working directory.
@@ -59,6 +61,7 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         Msg::RequestError => Request::ReturnError,
         Msg::OverviewState => Request::OverviewState,
         Msg::Casts => Request::Casts,
+        Msg::VirtualInputState => Request::VirtualInputState,
     };
 
     let mut socket = Socket::connect().context("error connecting to the niri socket")?;
@@ -521,6 +524,9 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                     Event::CastStopped { stream_id } => {
                         println!("Cast stopped: stream id {stream_id}");
                     }
+                    Event::VirtualInputChanged { virtual_input } => {
+                        println!("Virtual input changed: {virtual_input:?}");
+                    }
                 }
             }
         }
@@ -564,6 +570,20 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                 print_cast(&cast);
                 println!();
             }
+        }
+        Msg::VirtualInputState => {
+            let Response::VirtualInputState(response) = response else {
+                bail!("unexpected response: expected VirtualInputState, got {response:?}");
+            };
+
+            if json {
+                let response =
+                    serde_json::to_string(&response).context("error formatting response")?;
+                println!("{response}");
+                return Ok(());
+            }
+
+            print_virtual_input(&response);
         }
     }
 
@@ -830,6 +850,36 @@ fn print_cast(cast: &Cast) {
 
     if let Some(node_id) = cast.pw_node_id {
         println!("  PipeWire node ID: {node_id}");
+    }
+}
+
+fn print_virtual_input(virtual_input: &VirtualInput) {
+    let state = if virtual_input.active {
+        "active"
+    } else {
+        "idle"
+    };
+    let blocked = if virtual_input.blocked {
+        ", new synthetic input is blocked"
+    } else {
+        ""
+    };
+    println!("Virtual input is {state}{blocked}.");
+    println!("  Virtual pointers: {}", virtual_input.virtual_pointers);
+    println!(
+        "  Virtual keyboard clients: {}",
+        virtual_input.virtual_keyboard_clients
+    );
+    println!(
+        "  RemoteDesktop sessions: {}",
+        virtual_input.remote_desktop_sessions
+    );
+
+    if let Some(last) = virtual_input.last_activity {
+        let ago = get_monotonic_time().saturating_sub(Duration::from(last));
+        println!("  Last activity: {:.1} s ago", ago.as_secs_f64());
+    } else {
+        println!("  Last activity: never");
     }
 }
 

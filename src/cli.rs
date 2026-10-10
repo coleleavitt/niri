@@ -109,6 +109,8 @@ pub enum Msg {
     OverviewState,
     /// List screencasts.
     Casts,
+    /// Print the synthetic (virtual) input state.
+    VirtualInputState,
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]

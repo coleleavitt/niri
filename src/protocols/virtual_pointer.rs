@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use smithay::backend::input::{
@@ -47,6 +48,9 @@ pub struct VirtualPointerUserData {
     output: Option<Output>,
 
     axis_frame: Mutex<Option<AxisFrame>>,
+
+    /// Revoked pointers ignore all requests.
+    revoked: AtomicBool,
 }
 
 impl VirtualPointer {
@@ -282,6 +286,8 @@ pub trait VirtualPointerHandler {
         let _ = pointer;
     }
 
+    fn virtual_pointers_blocked(&self) -> bool;
+
     fn on_virtual_pointer_motion(&mut self, event: VirtualPointerMotionEvent);
     fn on_virtual_pointer_motion_absolute(&mut self, event: VirtualPointerMotionAbsoluteEvent);
     fn on_virtual_pointer_button(&mut self, event: VirtualPointerButtonEvent);
@@ -303,6 +309,17 @@ impl VirtualPointerManagerState {
 
         Self {
             virtual_pointers: HashSet::new(),
+        }
+    }
+
+    pub fn count(&self) -> usize {
+        self.virtual_pointers.len()
+    }
+
+    pub fn revoke_all(&mut self) {
+        for pointer in self.virtual_pointers.drain() {
+            let data = pointer.data::<VirtualPointerUserData>().unwrap();
+            data.revoked.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -356,14 +373,20 @@ where
             _ => unreachable!(),
         };
 
+        let blocked = state.virtual_pointers_blocked();
         let pointer = data_init.init(
             id,
             VirtualPointerUserData {
                 seat,
                 output,
                 axis_frame: Mutex::new(None),
+                revoked: AtomicBool::new(blocked),
             },
         );
+        if blocked {
+            return;
+        }
+
         state
             .virtual_pointer_manager_state()
             .virtual_pointers
@@ -387,6 +410,10 @@ where
         _dhandle: &DisplayHandle,
         _data_init: &mut DataInit<'_, D>,
     ) {
+        if self.revoked.load(Ordering::Relaxed) {
+            return;
+        }
+
         let pointer = VirtualPointer {
             pointer: resource.clone(),
         };
@@ -528,6 +555,10 @@ where
         _client: wayland_backend::server::ClientId,
         resource: &ZwlrVirtualPointerV1,
     ) {
+        if self.revoked.load(Ordering::Relaxed) {
+            return;
+        }
+
         let pointer = VirtualPointer {
             pointer: resource.clone(),
         };

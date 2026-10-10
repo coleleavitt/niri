@@ -11,7 +11,8 @@ mod legacy_input;
 mod registry;
 mod session;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use calloop::channel::Sender;
 use zbus::fdo::{self, RequestNameFlags};
@@ -38,6 +39,7 @@ static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 pub struct RemoteDesktop {
     to_niri: Sender<RemoteDesktopToNiri>,
     sessions: RemoteDesktopSessionRegistry,
+    virtual_input_blocked: Arc<AtomicBool>,
 }
 
 #[interface(name = "org.gnome.Mutter.RemoteDesktop")]
@@ -47,6 +49,12 @@ impl RemoteDesktop {
         #[zbus(header)] hdr: Header<'_>,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> fdo::Result<OwnedObjectPath> {
+        if self.virtual_input_blocked.load(Ordering::Relaxed) {
+            return Err(fdo::Error::AccessDenied(
+                "synthetic input is blocked".to_owned(),
+            ));
+        }
+
         let peer_name = peer_name(&hdr)?;
         let id = NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst);
         let path = session_path(id)?;
@@ -59,7 +67,8 @@ impl RemoteDesktop {
             self.sessions.clone(),
         );
 
-        self.sessions.insert_session(session_id.clone())?;
+        self.sessions
+            .insert_session(session_id.clone(), path.to_string())?;
 
         match server.at(&path, session).await {
             Ok(true) => {
@@ -103,8 +112,30 @@ impl RemoteDesktop {
     pub fn new(
         to_niri: Sender<RemoteDesktopToNiri>,
         sessions: RemoteDesktopSessionRegistry,
+        virtual_input_blocked: Arc<AtomicBool>,
     ) -> Self {
-        Self { to_niri, sessions }
+        Self {
+            to_niri,
+            sessions,
+            virtual_input_blocked,
+        }
+    }
+}
+
+/// Closes all sessions, emitting `Closed` for each.
+pub fn close_sessions(conn: &zbus::blocking::Connection, sessions: &RemoteDesktopSessionRegistry) {
+    let server = conn.object_server();
+    for path in sessions.session_paths() {
+        let Ok(iface) = server.interface::<_, Session>(path) else {
+            continue;
+        };
+
+        async_io::block_on(async {
+            let ctxt = iface.signal_emitter().clone();
+            if let Err(err) = iface.get().close(server.inner(), ctxt).await {
+                warn!("error closing RemoteDesktop session: {err:?}");
+            }
+        });
     }
 }
 
@@ -162,8 +193,11 @@ mod tests {
     #[test]
     fn introspection_exposes_mutter_entrypoints() {
         let (to_niri, _from_remote_desktop) = channel::channel();
-        let remote_desktop =
-            RemoteDesktop::new(to_niri.clone(), RemoteDesktopSessionRegistry::default());
+        let remote_desktop = RemoteDesktop::new(
+            to_niri.clone(),
+            RemoteDesktopSessionRegistry::default(),
+            Arc::default(),
+        );
         let mut xml = String::new();
         remote_desktop.introspect_to_writer(&mut xml, 0);
         assert!(xml.contains(r#"<method name="CreateSession">"#));

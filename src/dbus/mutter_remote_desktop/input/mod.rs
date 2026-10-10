@@ -99,6 +99,25 @@ pub struct RemoteDesktopPosition {
 }
 
 pub fn dispatch_to_niri(state: &mut State, msg: RemoteDesktopToNiri) {
+    let blocked = state.niri.virtual_input.is_blocked();
+    match msg {
+        RemoteDesktopToNiri::ConnectEis(_) if blocked => return,
+        RemoteDesktopToNiri::KeyboardKeycode { .. }
+        | RemoteDesktopToNiri::PointerButton { .. }
+        | RemoteDesktopToNiri::PointerAxis { .. }
+        | RemoteDesktopToNiri::PointerMotionRelative { .. }
+        | RemoteDesktopToNiri::PointerMotionAbsolute { .. }
+        | RemoteDesktopToNiri::TouchDown { .. }
+        | RemoteDesktopToNiri::TouchMotion { .. }
+        | RemoteDesktopToNiri::TouchUp { .. } => {
+            if blocked {
+                return;
+            }
+            state.niri.virtual_input_activity();
+        }
+        _ => (),
+    }
+
     let time_msec = event_time_msec();
 
     match msg {

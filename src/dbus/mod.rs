@@ -135,8 +135,11 @@ impl DBusServers {
                         calloop::channel::Event::Closed => (),
                     })
                     .unwrap();
-                let remote_desktop =
-                    RemoteDesktop::new(to_remote_desktop_niri, remote_desktop_sessions.clone());
+                let remote_desktop = RemoteDesktop::new(
+                    to_remote_desktop_niri,
+                    remote_desktop_sessions.clone(),
+                    niri.virtual_input.blocked_flag(),
+                );
                 dbus.conn_remote_desktop = try_start(remote_desktop);
                 dbus.remote_desktop_sessions = Some(remote_desktop_sessions.clone());
 

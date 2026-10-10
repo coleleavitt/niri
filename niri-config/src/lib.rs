@@ -82,6 +82,7 @@ pub struct Config {
     pub clipboard: Clipboard,
     pub hotkey_overlay: HotkeyOverlay,
     pub config_notification: ConfigNotification,
+    pub virtual_input_indicator: VirtualInputIndicator,
     pub animations: Animations,
     pub blur: Blur,
     pub gestures: Gestures,
@@ -200,6 +201,7 @@ where
                 "clipboard" => m_merge!(clipboard),
                 "hotkey-overlay" => m_merge!(hotkey_overlay),
                 "config-notification" => m_merge!(config_notification),
+                "virtual-input-indicator" => m_merge!(virtual_input_indicator),
                 "animations" => m_merge!(animations),
                 "blur" => m_merge!(blur),
                 "gestures" => m_merge!(gestures),
@@ -687,6 +689,61 @@ mod tests {
                 Some(OnXdgActivate::Ignore),
                 Some(OnXdgActivate::SetUrgent),
                 Some(OnXdgActivate::Focus),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_virtual_input_indicator() {
+        let parsed = do_parse(
+            r##"
+            virtual-input-indicator {
+                width 2.5
+                color "#00ff00"
+                idle-timeout-ms 500
+            }
+            "##,
+        );
+        assert_eq!(
+            parsed.virtual_input_indicator,
+            VirtualInputIndicator {
+                off: false,
+                width: 2.5,
+                color: Color::from_rgba8_unpremul(0, 255, 0, 255),
+                idle_timeout_ms: 500,
+            }
+        );
+
+        let parsed = do_parse("virtual-input-indicator { off; }");
+        assert_eq!(
+            parsed.virtual_input_indicator,
+            VirtualInputIndicator {
+                off: true,
+                ..VirtualInputIndicator::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_virtual_input_binds() {
+        let parsed = do_parse(
+            r#"
+            binds {
+                Mod+Ctrl+Escape { revoke-virtual-input; }
+                Mod+Ctrl+Shift+Escape { toggle-virtual-input-blocked; }
+            }
+            "#,
+        );
+        assert_eq!(
+            parsed
+                .binds
+                .0
+                .iter()
+                .map(|bind| bind.action.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Action::RevokeVirtualInput,
+                Action::ToggleVirtualInputBlocked
             ]
         );
     }
@@ -1559,6 +1616,17 @@ mod tests {
             },
             config_notification: ConfigNotification {
                 disable_failed: false,
+            },
+            virtual_input_indicator: VirtualInputIndicator {
+                off: false,
+                width: 4.0,
+                color: Color {
+                    r: 1.0,
+                    g: 0.5,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                idle_timeout_ms: 2000,
             },
             animations: Animations {
                 off: false,

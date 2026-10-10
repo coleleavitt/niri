@@ -393,6 +393,8 @@ pub enum Action {
     MruSetScope(MruScope),
     #[knuffel(skip)]
     MruCycleScope,
+    RevokeVirtualInput,
+    ToggleVirtualInputBlocked,
 }
 
 impl From<niri_ipc::Action> for Action {
@@ -705,6 +707,8 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::SetWindowUrgent { id } => Self::SetWindowUrgent(id),
             niri_ipc::Action::UnsetWindowUrgent { id } => Self::UnsetWindowUrgent(id),
             niri_ipc::Action::LoadConfigFile { path } => Self::LoadConfigFile(path),
+            niri_ipc::Action::RevokeVirtualInput {} => Self::RevokeVirtualInput,
+            niri_ipc::Action::ToggleVirtualInputBlocked {} => Self::ToggleVirtualInputBlocked,
         }
     }
 }

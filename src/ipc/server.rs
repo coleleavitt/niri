@@ -457,6 +457,16 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             let casts = state.casts.casts.values().cloned().collect();
             Response::Casts(casts)
         }
+        Request::VirtualInputState => {
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                let _ = tx.send_blocking(state.niri.virtual_input_state());
+            });
+            let result = rx.recv().await;
+            let virtual_input =
+                result.map_err(|_| String::from("error getting virtual input state"))?;
+            Response::VirtualInputState(virtual_input)
+        }
     };
 
     Ok(response)
@@ -804,6 +814,29 @@ impl State {
         }
 
         let event = Event::OverviewOpenedOrClosed { is_open };
+        state.apply(event.clone());
+        server.send_event(event);
+    }
+
+    pub fn ipc_refresh_virtual_input(&mut self) {
+        let Some(server) = &self.niri.ipc_server else {
+            return;
+        };
+
+        let mut state = server.event_stream_state.borrow_mut();
+        let state = &mut state.virtual_input;
+        let virtual_input = self.niri.virtual_input_state();
+
+        // Activity alone only updates last_activity; only send events for actual changes.
+        let unchanged = niri_ipc::VirtualInput {
+            last_activity: state.virtual_input.last_activity,
+            ..virtual_input.clone()
+        };
+        if state.virtual_input == unchanged {
+            return;
+        }
+
+        let event = Event::VirtualInputChanged { virtual_input };
         state.apply(event.clone());
         server.send_event(event);
     }
