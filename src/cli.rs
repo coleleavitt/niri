@@ -126,6 +126,23 @@ pub enum Msg {
         #[arg(allow_negative_numbers = true)]
         y: f64,
     },
+    /// Render a window alone and write it to a PNG file.
+    ///
+    /// Works for tiled, offscreen and covered windows. Does not touch the clipboard. Returns once
+    /// the file has been fully written.
+    CaptureWindow {
+        /// Path to write the PNG to.
+        #[arg(long)]
+        path: String,
+        /// Id of the window to capture.
+        ///
+        /// If not set, uses the focused window.
+        #[arg(long)]
+        id: Option<u64>,
+        /// Include the mouse pointer if it is over the window.
+        #[arg(long)]
+        show_pointer: bool,
+    },
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]
@@ -170,5 +187,96 @@ mod tests {
             }) => (),
             _ => panic!("expected suspend action"),
         }
+    }
+
+    #[test]
+    fn parses_capture_window() {
+        let cli = Cli::parse_from([
+            "niri",
+            "msg",
+            "capture-window",
+            "--path",
+            "/tmp/w.png",
+            "--id",
+            "7",
+            "--show-pointer",
+        ]);
+
+        match cli.subcommand {
+            Some(Sub::Msg {
+                msg:
+                    Msg::CaptureWindow {
+                        path,
+                        id: Some(7),
+                        show_pointer: true,
+                    },
+                json: false,
+            }) => assert_eq!(path, "/tmp/w.png"),
+            _ => panic!("expected capture-window"),
+        }
+
+        let cli = Cli::parse_from(["niri", "msg", "capture-window", "--path", "/tmp/w.png"]);
+        assert!(matches!(
+            cli.subcommand,
+            Some(Sub::Msg {
+                msg: Msg::CaptureWindow {
+                    id: None,
+                    show_pointer: false,
+                    ..
+                },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_screenshot_copy_to_clipboard() {
+        let cli = Cli::parse_from([
+            "niri",
+            "msg",
+            "action",
+            "screenshot-window",
+            "--copy-to-clipboard=false",
+        ]);
+        assert!(matches!(
+            cli.subcommand,
+            Some(Sub::Msg {
+                msg: Msg::Action {
+                    action: Action::ScreenshotWindow {
+                        copy_to_clipboard: false,
+                        ..
+                    },
+                },
+                ..
+            })
+        ));
+
+        let cli = Cli::parse_from(["niri", "msg", "action", "screenshot-screen"]);
+        assert!(matches!(
+            cli.subcommand,
+            Some(Sub::Msg {
+                msg: Msg::Action {
+                    action: Action::ScreenshotScreen {
+                        copy_to_clipboard: true,
+                        ..
+                    },
+                },
+                ..
+            })
+        ));
+
+        let cli = Cli::parse_from(["niri", "msg", "action", "screenshot", "-c", "false"]);
+        assert!(matches!(
+            cli.subcommand,
+            Some(Sub::Msg {
+                msg: Msg::Action {
+                    action: Action::Screenshot {
+                        copy_to_clipboard: false,
+                        ..
+                    },
+                },
+                ..
+            })
+        ));
     }
 }

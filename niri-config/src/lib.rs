@@ -692,6 +692,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_screenshot_copy_to_clipboard() {
+        let parsed = do_parse(
+            r#"
+            binds {
+                Print { screenshot copy-to-clipboard=false; }
+                Ctrl+Print { screenshot-screen copy-to-clipboard=false; }
+                Alt+Print { screenshot-window copy-to-clipboard=false show-pointer=true; }
+                Mod+Print { screenshot-window; }
+            }
+            "#,
+        );
+
+        let actions: Vec<_> = parsed.binds.0.iter().map(|bind| &bind.action).collect();
+        assert_eq!(
+            actions,
+            [
+                &Action::Screenshot(true, false, None),
+                &Action::ScreenshotScreen(true, true, false, None),
+                &Action::ScreenshotWindow(true, true, false, None),
+                &Action::ScreenshotWindow(true, false, true, None),
+            ]
+        );
+    }
+
+    #[test]
     fn parse() {
         let parsed = do_parse(
             r##"

@@ -5,6 +5,7 @@ mod fixture;
 mod server;
 
 mod animations;
+mod capture_window;
 mod floating;
 mod fullscreen;
 mod ipc;

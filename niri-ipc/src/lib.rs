@@ -136,6 +136,22 @@ pub enum Request {
         /// Y coordinate in the global logical coordinate space.
         y: f64,
     },
+    /// Render a window alone and write it to a PNG file.
+    ///
+    /// Works for tiled, offscreen and covered windows. Never touches the clipboard. The reply is
+    /// sent only after the file has been fully written.
+    CaptureWindow {
+        /// Id of the window to capture.
+        ///
+        /// If `None`, uses the focused window.
+        id: Option<u64>,
+        /// Absolute path to write the PNG to.
+        path: String,
+        /// Whether to include the mouse pointer.
+        ///
+        /// The pointer will be included only if the window is currently receiving pointer input.
+        show_pointer: bool,
+    },
 }
 
 /// Reply from niri to client.
@@ -186,6 +202,8 @@ pub enum Response {
     WindowGeometry(WindowGeometry),
     /// Result of a hit test.
     WindowAt(PointHit),
+    /// Information about a captured window.
+    WindowCaptured(WindowCapture),
 }
 
 /// Overview information.
@@ -225,6 +243,28 @@ pub struct LayerHit {
     pub namespace: String,
     /// Layer that the surface is on.
     pub layer: Layer,
+}
+
+/// Window capture written to disk.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct WindowCapture {
+    /// Id of the captured window.
+    pub id: u64,
+    /// Path the PNG was written to.
+    pub path: String,
+    /// Width of the PNG in physical pixels.
+    pub width_px: u32,
+    /// Height of the PNG in physical pixels.
+    pub height_px: u32,
+    /// Output scale used for rendering.
+    pub scale: f64,
+    /// Top-left of the window geometry inside the PNG, in physical pixels.
+    ///
+    /// Popups and client-side decorations can make the PNG larger than the window geometry.
+    pub window_offset_px: (i32, i32),
+    /// Size of the window geometry inside the PNG, in physical pixels.
+    pub window_size_px: (i32, i32),
 }
 
 /// Color picked from the screen.
@@ -280,6 +320,11 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = true))]
         show_pointer: bool,
 
+        /// Whether to copy the screenshot to the clipboard.
+        #[cfg_attr(feature = "clap", arg(short = 'c', long, action = clap::ArgAction::Set, default_value_t = true))]
+        #[serde(default = "default_true")]
+        copy_to_clipboard: bool,
+
         /// Path to save the screenshot to.
         ///
         /// The path must be absolute, otherwise an error is returned.
@@ -290,7 +335,7 @@ pub enum Action {
     },
     /// Screenshot the focused screen.
     ScreenshotScreen {
-        /// Write the screenshot to disk in addition to putting it in your clipboard.
+        /// Write the screenshot to disk.
         ///
         /// The screenshot is saved according to the `screenshot-path` config setting.
         #[cfg_attr(feature = "clap", arg(short = 'd', long, action = clap::ArgAction::Set, default_value_t = true))]
@@ -299,6 +344,11 @@ pub enum Action {
         /// Whether to include the mouse pointer in the screenshot.
         #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = true))]
         show_pointer: bool,
+
+        /// Whether to copy the screenshot to the clipboard.
+        #[cfg_attr(feature = "clap", arg(short = 'c', long, action = clap::ArgAction::Set, default_value_t = true))]
+        #[serde(default = "default_true")]
+        copy_to_clipboard: bool,
 
         /// Path to save the screenshot to.
         ///
@@ -316,7 +366,7 @@ pub enum Action {
         /// If `None`, uses the focused window.
         #[cfg_attr(feature = "clap", arg(long))]
         id: Option<u64>,
-        /// Write the screenshot to disk in addition to putting it in your clipboard.
+        /// Write the screenshot to disk.
         ///
         /// The screenshot is saved according to the `screenshot-path` config setting.
         #[cfg_attr(feature = "clap", arg(short = 'd', long, action = clap::ArgAction::Set, default_value_t = true))]
@@ -328,6 +378,11 @@ pub enum Action {
         /// (usually this means the pointer is on top of the window).
         #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = false))]
         show_pointer: bool,
+
+        /// Whether to copy the screenshot to the clipboard.
+        #[cfg_attr(feature = "clap", arg(short = 'c', long, action = clap::ArgAction::Set, default_value_t = true))]
+        #[serde(default = "default_true")]
+        copy_to_clipboard: bool,
 
         /// Path to save the screenshot to.
         ///
@@ -1862,6 +1917,10 @@ pub enum Event {
     },
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl From<Duration> for Timestamp {
     fn from(value: Duration) -> Self {
         Timestamp {
@@ -2284,5 +2343,58 @@ mod tests {
         );
         assert!("-".parse::<PositionChange>().is_err());
         assert!("10% ".parse::<PositionChange>().is_err());
+    }
+
+    #[test]
+    fn screenshot_copy_to_clipboard_defaults_to_true() {
+        let action: Action = serde_json::from_str(
+            r#"{"ScreenshotWindow":{"id":null,"write_to_disk":true,"show_pointer":false,"path":null}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            action,
+            Action::ScreenshotWindow {
+                copy_to_clipboard: true,
+                ..
+            }
+        ));
+
+        let action: Action = serde_json::from_str(
+            r#"{"ScreenshotScreen":{"write_to_disk":true,"show_pointer":true,"copy_to_clipboard":false,"path":null}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            action,
+            Action::ScreenshotScreen {
+                copy_to_clipboard: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn capture_window_json_shape() {
+        let request: Request = serde_json::from_str(
+            r#"{"CaptureWindow":{"id":3,"path":"/tmp/w.png","show_pointer":false}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            Request::CaptureWindow { id: Some(3), ref path, show_pointer: false } if path == "/tmp/w.png"
+        ));
+
+        let response = Response::WindowCaptured(WindowCapture {
+            id: 3,
+            path: String::from("/tmp/w.png"),
+            width_px: 120,
+            height_px: 90,
+            scale: 1.5,
+            window_offset_px: (10, 20),
+            window_size_px: (100, 50),
+        });
+        assert_eq!(
+            serde_json::to_string(&response).unwrap(),
+            r#"{"WindowCaptured":{"id":3,"path":"/tmp/w.png","width_px":120,"height_px":90,"scale":1.5,"window_offset_px":[10,20],"window_size_px":[100,50]}}"#,
+        );
     }
 }

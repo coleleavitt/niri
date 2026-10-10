@@ -96,6 +96,30 @@ $ env NIRI_SOCKET=./temp.sock niri msg action focus-workspace 2
 
 You can find all available requests and response types in the [niri-ipc sub-crate documentation](https://niri-wm.github.io/niri/niri_ipc/).
 
+### Capturing a Window
+
+<sup>Since: next release</sup>
+
+`niri msg capture-window --path /abs/path.png` renders one window alone and writes it to a PNG file.
+It works for tiled, scrolled-out-of-view, and covered windows, and does not touch the clipboard.
+The command returns only after the file has been fully written.
+
+- `--id N` captures the window with that id instead of the focused window.
+- `--show-pointer` includes the pointer if it is over the window.
+- A relative `--path` is resolved against the working directory of `niri msg`. A raw `CaptureWindow` request over the socket needs an absolute path.
+
+The JSON reply describes the image:
+
+```sh
+$ niri msg --json capture-window --path /tmp/window.png
+{"id":12,"path":"/tmp/window.png","width_px":1210,"height_px":820,"scale":1.25,"window_offset_px":[5,10],"window_size_px":[1200,800]}
+```
+
+Sizes are in physical pixels at the output's `scale`.
+Popups and client-side decorations can make the image larger than the window, so `window_offset_px` and `window_size_px` give the window geometry inside the image.
+
+The `screenshot`, `screenshot-screen` and `screenshot-window` actions also take `--copy-to-clipboard=false` to keep the screenshot out of the clipboard.
+
 ### Backwards Compatibility
 
 The JSON output *should* remain stable, as in:

@@ -9,7 +9,7 @@ use niri_ipc::socket::Socket;
 use niri_ipc::{
     Action, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, LogicalRect, Mode,
     Output, OutputConfigChanged, Overview, PointHit, Request, Response, Transform, Window,
-    WindowGeometry, WindowLayout,
+    WindowCapture, WindowGeometry, WindowLayout,
 };
 use serde_json::json;
 
@@ -28,6 +28,9 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         if let Some(path) = path {
             ensure_absolute_path(path).context("error making the path absolute")?;
         }
+    }
+    if let Msg::CaptureWindow { path, .. } = &mut msg {
+        ensure_absolute_path(path).context("error making the path absolute")?;
     }
 
     let wait_for_screenshot = matches!(
@@ -62,6 +65,15 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         Msg::Casts => Request::Casts,
         Msg::WindowGeometry { id } => Request::WindowGeometry { id: *id },
         Msg::WindowAt { x, y } => Request::WindowAt { x: *x, y: *y },
+        Msg::CaptureWindow {
+            path,
+            id,
+            show_pointer,
+        } => Request::CaptureWindow {
+            id: *id,
+            path: path.clone(),
+            show_pointer: *show_pointer,
+        },
     };
 
     let mut socket = Socket::connect().context("error connecting to the niri socket")?;
@@ -595,6 +607,32 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
 
             print_point_hit(&hit);
         }
+        Msg::CaptureWindow { .. } => {
+            let Response::WindowCaptured(capture) = response else {
+                bail!("unexpected response: expected WindowCaptured, got {response:?}");
+            };
+
+            if json {
+                let capture =
+                    serde_json::to_string(&capture).context("error formatting response")?;
+                println!("{capture}");
+                return Ok(());
+            }
+
+            let WindowCapture {
+                id,
+                path,
+                width_px,
+                height_px,
+                scale,
+                window_offset_px: (x, y),
+                window_size_px: (w, h),
+            } = capture;
+            println!("Captured window {id} to {path}");
+            println!("  Image size: {width_px} × {height_px} px");
+            println!("  Scale: {}", fmt_rounded(scale));
+            println!("  Window geometry in image: {w} × {h} px at ({x}, {y})");
+        }
     }
 
     Ok(())
@@ -993,17 +1031,20 @@ mod tests {
     fn screenshot_actions_wait_for_capture() {
         assert!(action_waits_for_screenshot(&Action::Screenshot {
             show_pointer: true,
+            copy_to_clipboard: true,
             path: None,
         }));
         assert!(action_waits_for_screenshot(&Action::ScreenshotScreen {
             write_to_disk: true,
             show_pointer: true,
+            copy_to_clipboard: true,
             path: None,
         }));
         assert!(action_waits_for_screenshot(&Action::ScreenshotWindow {
             id: None,
             write_to_disk: true,
             show_pointer: false,
+            copy_to_clipboard: false,
             path: None,
         }));
         assert!(!action_waits_for_screenshot(&Action::ToggleOverview {}));
