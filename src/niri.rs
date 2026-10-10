@@ -90,6 +90,7 @@ use smithay::wayland::keyboard_shortcuts_inhibit::{
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraintsState};
 use smithay::wayland::pointer_gestures::PointerGesturesState;
+use smithay::wayland::pointer_warp::PointerWarpManager;
 use smithay::wayland::presentation::PresentationState;
 use smithay::wayland::relative_pointer::RelativePointerManagerState;
 use smithay::wayland::security_context::SecurityContextState;
@@ -319,6 +320,7 @@ pub struct Niri {
     pub pointer_gestures_state: PointerGesturesState,
     pub relative_pointer_state: RelativePointerManagerState,
     pub pointer_constraints_state: PointerConstraintsState,
+    pub pointer_warp_manager: PointerWarpManager,
     pub idle_notifier_state: IdleNotifierState<State>,
     pub idle_inhibit_manager_state: IdleInhibitManagerState,
     pub data_device_state: DataDeviceState,
@@ -2539,6 +2541,7 @@ impl Niri {
         let pointer_gestures_state = PointerGesturesState::new::<State>(&display_handle);
         let relative_pointer_state = RelativePointerManagerState::new::<State>(&display_handle);
         let pointer_constraints_state = PointerConstraintsState::new::<State>(&display_handle);
+        let pointer_warp_manager = PointerWarpManager::new::<State>(&display_handle);
         let idle_notifier_state = IdleNotifierState::new(&display_handle, event_loop.clone());
         let idle_inhibit_manager_state = IdleInhibitManagerState::new::<State>(&display_handle);
         let data_device_state = DataDeviceState::new::<State>(&display_handle);
@@ -2787,6 +2790,7 @@ impl Niri {
             pointer_gestures_state,
             relative_pointer_state,
             pointer_constraints_state,
+            pointer_warp_manager,
             idle_notifier_state,
             idle_inhibit_manager_state,
             data_device_state,
@@ -3795,6 +3799,45 @@ impl Niri {
         rv.window = window;
         rv.layer = layer;
         rv
+    }
+
+    /// Hit tests the given point for IPC, consistently with pointer input.
+    pub fn window_at(&self, pos: Point<f64, Logical>) -> niri_ipc::PointHit {
+        let contents = self.contents_under(pos);
+
+        let mut window_id = None;
+        let mut window_local = None;
+        if let Some((window, hit)) = &contents.window {
+            let toplevel = window.toplevel().expect("no X11 support");
+            if let Some((mapped, _)) = self.layout.find_window_and_output(toplevel.wl_surface()) {
+                window_id = Some(mapped.id().get());
+            }
+
+            if let (HitType::Input { win_pos }, Some(output)) = (hit, &contents.output) {
+                let output_loc = self.global_space.output_geometry(output).unwrap().loc;
+                let geo_loc = *win_pos + window.geometry().loc.to_f64() + output_loc.to_f64();
+                let local = pos - geo_loc;
+                window_local = Some((local.x, local.y));
+            }
+        }
+
+        let layer = contents.layer.as_ref().map(|surface| niri_ipc::LayerHit {
+            namespace: surface.namespace().to_owned(),
+            layer: match surface.layer() {
+                Layer::Background => niri_ipc::Layer::Background,
+                Layer::Bottom => niri_ipc::Layer::Bottom,
+                Layer::Top => niri_ipc::Layer::Top,
+                Layer::Overlay => niri_ipc::Layer::Overlay,
+            },
+        });
+
+        niri_ipc::PointHit {
+            output: contents.output.as_ref().map(|output| output.name()),
+            window_id,
+            window_local,
+            is_input: contents.surface.is_some(),
+            layer,
+        }
     }
 
     pub fn output_under_cursor(&self) -> Option<Output> {

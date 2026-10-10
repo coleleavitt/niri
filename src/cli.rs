@@ -117,6 +117,15 @@ pub enum Msg {
         #[arg(long)]
         id: Option<u64>,
     },
+    /// Print the window or layer-shell surface at a point.
+    WindowAt {
+        /// X coordinate in the global logical coordinate space.
+        #[arg(allow_negative_numbers = true)]
+        x: f64,
+        /// Y coordinate in the global logical coordinate space.
+        #[arg(allow_negative_numbers = true)]
+        y: f64,
+    },
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]

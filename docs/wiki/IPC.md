@@ -47,6 +47,24 @@ $ niri msg --json window-geometry --id 12
 
 The geometry is computed on request rather than sent through the event stream, since it changes on every animation frame.
 
+### Hit Testing
+
+<sup>Since: next release</sup>
+
+`niri msg window-at X Y` reports what a pointer click at a point would hit.
+The point is in the global logical coordinate space, the same one as the logical positions in `niri msg outputs`.
+The answer uses the same hit testing as real pointer input, so layer-shell surfaces on top, pop-ups, and the overview are taken into account.
+
+```sh
+$ niri msg --json window-at 120 80
+{"output":"DP-1","window_id":12,"window_local":[104.0,64.0],"is_input":true,"layer":null}
+```
+
+- `window_id` is the topmost window under the point.
+- `window_local` is the point relative to the top-left corner of the window geometry. It is only set when `is_input` is `true`.
+- `is_input` is `false` when a click there would only activate the window, for example on its border or when the overview is open.
+- `layer` is set when a layer-shell surface, such as a bar or a notification, is on top at that point.
+
 ### Programmatic Access
 
 `niri msg --json` is a thin wrapper over writing and reading to a socket.
