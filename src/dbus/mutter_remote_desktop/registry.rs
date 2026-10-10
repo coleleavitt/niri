@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use zbus::fdo;
 
 use super::clipboard::{RemoteDesktopClipboardOwner, RemoteDesktopClipboardSession};
+use super::input::{RemoteDesktopAbsolutePosition, RemoteDesktopPosition};
 use crate::utils::{CastSessionId, CastStreamId};
 
 #[derive(Clone, Debug)]
@@ -38,16 +39,9 @@ pub enum RemoteDesktopStreamTarget {
         width: i32,
         height: i32,
     },
-    Window,
-}
-
-#[derive(Clone, Debug)]
-pub struct RemoteDesktopStreamPosition {
-    pub output_name: String,
-    pub x: f64,
-    pub y: f64,
-    pub width: i32,
-    pub height: i32,
+    Window {
+        id: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -58,6 +52,12 @@ pub struct RemoteDesktopOutputRegion {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteDesktopWindowRegion {
+    pub mapping_id: u64,
+    pub window_id: u64,
 }
 
 #[derive(Debug, Default)]
@@ -188,7 +188,7 @@ impl RemoteDesktopSessionRegistry {
         stream_path: &str,
         x: f64,
         y: f64,
-    ) -> fdo::Result<RemoteDesktopStreamPosition> {
+    ) -> fdo::Result<RemoteDesktopAbsolutePosition> {
         if !x.is_finite() || !y.is_finite() {
             return Err(fdo::Error::InvalidArgs(
                 "remote desktop coordinates must be finite".to_owned(),
@@ -205,7 +205,7 @@ impl RemoteDesktopSessionRegistry {
                 )));
             };
 
-            stream.position(x, y)
+            Ok(stream.position(x, y))
         })
     }
 
@@ -215,6 +215,18 @@ impl RemoteDesktopSessionRegistry {
                 .streams
                 .values()
                 .filter_map(RemoteDesktopStream::output_region)
+                .collect::<Vec<_>>();
+            regions.sort_by_key(|region| region.mapping_id);
+            Ok(regions)
+        })
+    }
+
+    pub fn window_regions(&self, session_id: &str) -> fdo::Result<Vec<RemoteDesktopWindowRegion>> {
+        self.with_session(session_id, |session| {
+            let mut regions = session
+                .streams
+                .values()
+                .filter_map(RemoteDesktopStream::window_region)
                 .collect::<Vec<_>>();
             regions.sort_by_key(|region| region.mapping_id);
             Ok(regions)
@@ -262,14 +274,14 @@ impl RemoteDesktopStream {
         }
     }
 
-    pub fn window(stream_id: CastStreamId) -> Self {
+    pub fn window(stream_id: CastStreamId, window_id: u64) -> Self {
         Self {
             stream_id,
-            target: RemoteDesktopStreamTarget::Window,
+            target: RemoteDesktopStreamTarget::Window { id: window_id },
         }
     }
 
-    fn position(&self, x: f64, y: f64) -> fdo::Result<RemoteDesktopStreamPosition> {
+    fn position(&self, x: f64, y: f64) -> RemoteDesktopAbsolutePosition {
         match &self.target {
             RemoteDesktopStreamTarget::Output {
                 name,
@@ -277,16 +289,16 @@ impl RemoteDesktopStream {
                 y: _,
                 width,
                 height,
-            } => Ok(RemoteDesktopStreamPosition {
+            } => RemoteDesktopAbsolutePosition::Output(RemoteDesktopPosition {
                 output_name: name.clone(),
                 x,
                 y,
                 width: *width,
                 height: *height,
             }),
-            RemoteDesktopStreamTarget::Window => Err(fdo::Error::NotSupported(
-                "remote desktop absolute input for window streams is not implemented".to_owned(),
-            )),
+            RemoteDesktopStreamTarget::Window { id } => {
+                RemoteDesktopAbsolutePosition::Window { id: *id, x, y }
+            }
         }
     }
 
@@ -306,7 +318,17 @@ impl RemoteDesktopStream {
                 width: *width,
                 height: *height,
             }),
-            RemoteDesktopStreamTarget::Window => None,
+            RemoteDesktopStreamTarget::Window { .. } => None,
+        }
+    }
+
+    fn window_region(&self) -> Option<RemoteDesktopWindowRegion> {
+        match &self.target {
+            RemoteDesktopStreamTarget::Output { .. } => None,
+            RemoteDesktopStreamTarget::Window { id } => Some(RemoteDesktopWindowRegion {
+                mapping_id: self.stream_id.get(),
+                window_id: *id,
+            }),
         }
     }
 }
@@ -364,6 +386,9 @@ mod tests {
         let position = registry
             .stream_position("/org/gnome/Mutter/ScreenCast/Stream/u999", 320.0, 240.0)
             .unwrap();
+        let RemoteDesktopAbsolutePosition::Output(position) = position else {
+            panic!("expected an output position: {position:?}");
+        };
 
         assert_eq!(position.output_name, "HDMI-A-1");
         assert_eq!(position.x, 320.0);
@@ -415,5 +440,93 @@ mod tests {
                 height: 1080,
             }]
         );
+    }
+
+    #[test]
+    fn registry_resolves_window_stream_positions_to_the_window() {
+        let registry = RemoteDesktopSessionRegistry::default();
+        let session_id = "window-session".to_owned();
+        let screen_cast_session = CastSessionId::next();
+        let output_stream_id = CastStreamId::next();
+        let window_stream_id = CastStreamId::next();
+        let window_path = "/org/gnome/Mutter/ScreenCast/Stream/u1000";
+
+        registry
+            .insert_session(session_id.clone(), String::new())
+            .unwrap();
+        registry
+            .associate_screen_cast(&session_id, screen_cast_session)
+            .unwrap();
+        registry
+            .register_stream(
+                screen_cast_session,
+                "/org/gnome/Mutter/ScreenCast/Stream/u999".to_owned(),
+                RemoteDesktopStream::output(
+                    output_stream_id,
+                    RemoteDesktopOutputStream {
+                        name: "HDMI-A-1".to_owned(),
+                        x: 0,
+                        y: 0,
+                        width: 1920,
+                        height: 1080,
+                    },
+                ),
+            )
+            .unwrap();
+        registry
+            .register_stream(
+                screen_cast_session,
+                window_path.to_owned(),
+                RemoteDesktopStream::window(window_stream_id, 42),
+            )
+            .unwrap();
+
+        let position = registry.stream_position(window_path, 12.5, 7.0).unwrap();
+        assert!(matches!(
+            position,
+            RemoteDesktopAbsolutePosition::Window {
+                id: 42,
+                x: 12.5,
+                y: 7.0
+            }
+        ));
+
+        assert_eq!(
+            registry.window_regions(&session_id).unwrap(),
+            vec![RemoteDesktopWindowRegion {
+                mapping_id: window_stream_id.get(),
+                window_id: 42,
+            }]
+        );
+        let output_regions = registry.output_regions(&session_id).unwrap();
+        assert_eq!(output_regions.len(), 1);
+        assert_eq!(output_regions[0].mapping_id, output_stream_id.get());
+    }
+
+    #[test]
+    fn registry_rejects_non_finite_window_stream_positions() {
+        let registry = RemoteDesktopSessionRegistry::default();
+        let session_id = "window-session".to_owned();
+        let screen_cast_session = CastSessionId::next();
+        let window_path = "/org/gnome/Mutter/ScreenCast/Stream/u1001";
+
+        registry
+            .insert_session(session_id.clone(), String::new())
+            .unwrap();
+        registry
+            .associate_screen_cast(&session_id, screen_cast_session)
+            .unwrap();
+        registry
+            .register_stream(
+                screen_cast_session,
+                window_path.to_owned(),
+                RemoteDesktopStream::window(CastStreamId::next(), 42),
+            )
+            .unwrap();
+
+        assert!(registry.stream_position(window_path, f64::NAN, 0.).is_err());
+        assert!(registry
+            .stream_position(window_path, 0., f64::INFINITY)
+            .is_err());
     }
 }

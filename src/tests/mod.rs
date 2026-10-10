@@ -12,6 +12,8 @@ mod image_copy_capture;
 mod ipc;
 mod layer_shell;
 mod pointer_warp;
+#[cfg(feature = "xdp-gnome-screencast")]
+mod remote_desktop;
 mod remove_output;
 mod transactions;
 mod virtual_input;

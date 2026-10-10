@@ -1,5 +1,6 @@
 mod device;
 mod events;
+pub(super) mod window;
 
 use smithay::backend::input::{AxisSource, ButtonState, InputEvent, KeyState, Keycode};
 
@@ -66,15 +67,15 @@ pub enum RemoteDesktopToNiri {
         dy: f64,
     },
     PointerMotionAbsolute {
-        position: RemoteDesktopPosition,
+        position: RemoteDesktopAbsolutePosition,
     },
     TouchDown {
         slot: u32,
-        position: RemoteDesktopPosition,
+        position: RemoteDesktopAbsolutePosition,
     },
     TouchMotion {
         slot: u32,
-        position: RemoteDesktopPosition,
+        position: RemoteDesktopAbsolutePosition,
     },
     TouchUp {
         slot: u32,
@@ -87,6 +88,17 @@ pub struct RemoteDesktopAxisFrame {
     pub v120: Option<(f64, f64)>,
     pub source: AxisSource,
     pub stop: (bool, bool),
+}
+
+#[derive(Debug, Clone)]
+pub enum RemoteDesktopAbsolutePosition {
+    Output(RemoteDesktopPosition),
+    /// Position in the physical pixels of a window stream buffer.
+    Window {
+        id: u64,
+        x: f64,
+        y: f64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +225,9 @@ pub fn dispatch_to_niri(state: &mut State, msg: RemoteDesktopToNiri) {
             });
         }
         RemoteDesktopToNiri::PointerMotionAbsolute { position } => {
+            let Some(position) = resolve_position(state, position) else {
+                return;
+            };
             let output_name = Some(position.output_name.clone());
             state.process_input_event(
                 InputEvent::<RemoteDesktopInputBackend>::PointerMotionAbsolute {
@@ -224,6 +239,10 @@ pub fn dispatch_to_niri(state: &mut State, msg: RemoteDesktopToNiri) {
             );
         }
         RemoteDesktopToNiri::TouchDown { slot, position } => {
+            let Some(position) = resolve_position(state, position) else {
+                state.niri.virtual_input.track_touch(slot, false);
+                return;
+            };
             dispatch_touch_position(
                 state,
                 timed_touch(time_msec, slot, position),
@@ -231,6 +250,9 @@ pub fn dispatch_to_niri(state: &mut State, msg: RemoteDesktopToNiri) {
             );
         }
         RemoteDesktopToNiri::TouchMotion { slot, position } => {
+            let Some(position) = resolve_position(state, position) else {
+                return;
+            };
             dispatch_touch_position(
                 state,
                 timed_touch(time_msec, slot, position),
@@ -245,6 +267,24 @@ pub fn dispatch_to_niri(state: &mut State, msg: RemoteDesktopToNiri) {
                 },
             });
             dispatch_touch_frame(state, time_msec);
+        }
+    }
+}
+
+fn resolve_position(
+    state: &State,
+    position: RemoteDesktopAbsolutePosition,
+) -> Option<RemoteDesktopPosition> {
+    match position {
+        RemoteDesktopAbsolutePosition::Output(position) => Some(position),
+        RemoteDesktopAbsolutePosition::Window { id, x, y } => {
+            match window::window_position(&state.niri, id, x, y) {
+                Ok(position) => Some(position),
+                Err(err) => {
+                    warn!("dropping remote desktop absolute input for window {id}: {err}");
+                    None
+                }
+            }
         }
     }
 }

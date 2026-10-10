@@ -72,6 +72,7 @@ pub struct Stream {
     session_id: CastSessionId,
     target: StreamTarget,
     cursor_mode: CursorMode,
+    mapping_id: Option<String>,
     was_started: Arc<AtomicBool>,
     to_niri: calloop::channel::Sender<ScreenCastToNiri>,
 }
@@ -105,6 +106,9 @@ struct StreamParameters {
     position: (i32, i32),
     /// Size of the stream in logical coordinates.
     size: (i32, i32),
+    /// Identifier of the matching libei region, for streams in a remote desktop session.
+    #[zvariant(rename = "mapping-id")]
+    mapping_id: Option<String>,
 }
 
 pub enum ScreenCastToNiri {
@@ -285,6 +289,7 @@ impl Session {
             self.id,
             target,
             cursor_mode,
+            self.mapping_id(stream_id),
             self.to_niri.clone(),
         );
         match server.at(&path, stream.clone()).await {
@@ -332,6 +337,7 @@ impl Session {
             self.id,
             target,
             cursor_mode,
+            self.mapping_id(stream_id),
             self.to_niri.clone(),
         );
         match server.at(&path, stream.clone()).await {
@@ -339,7 +345,10 @@ impl Session {
                 let iface = server.interface(&path).await.map_err(|err| {
                     fdo::Error::Failed(format!("error retrieving stream interface: {err:?}"))
                 })?;
-                self.register_remote_desktop_stream(&path, RemoteDesktopStream::window(stream_id))?;
+                self.register_remote_desktop_stream(
+                    &path,
+                    RemoteDesktopStream::window(stream_id, properties.window_id),
+                )?;
                 self.streams
                     .lock()
                     .map_err(|_| {
@@ -370,16 +379,17 @@ impl Stream {
 
     #[zbus(property)]
     async fn parameters(&self) -> fdo::Result<StreamParameters> {
-        match &self.target {
-            StreamTarget::Output(output) => output_stream_parameters(output),
-            StreamTarget::Window { .. } => Ok(
-                // Does any consumer need this?
-                StreamParameters {
-                    position: (0, 0),
-                    size: (1, 1),
-                },
-            ),
-        }
+        let mut parameters = match &self.target {
+            StreamTarget::Output(output) => output_stream_parameters(output)?,
+            // Does any consumer need this?
+            StreamTarget::Window { .. } => StreamParameters {
+                position: (0, 0),
+                size: (1, 1),
+                mapping_id: None,
+            },
+        };
+        parameters.mapping_id.clone_from(&self.mapping_id);
+        Ok(parameters)
     }
 }
 
@@ -444,6 +454,13 @@ impl Session {
         self.remote_desktop_sessions
             .register_stream(self.id, path.as_str().to_owned(), stream)
     }
+
+    /// Matches the EIS region mapping id of the stream, like Mutter.
+    fn mapping_id(&self, stream_id: CastStreamId) -> Option<String> {
+        self.remote_desktop_session_id
+            .as_ref()
+            .map(|_| stream_id.get().to_string())
+    }
 }
 
 impl Drop for Session {
@@ -461,6 +478,7 @@ impl Stream {
         session_id: CastSessionId,
         target: StreamTarget,
         cursor_mode: CursorMode,
+        mapping_id: Option<String>,
         to_niri: calloop::channel::Sender<ScreenCastToNiri>,
     ) -> Self {
         Self {
@@ -468,6 +486,7 @@ impl Stream {
             session_id,
             target,
             cursor_mode,
+            mapping_id,
             was_started: Arc::new(AtomicBool::new(false)),
             to_niri,
         }
@@ -537,6 +556,7 @@ fn output_stream_parameters(output: &niri_ipc::Output) -> fdo::Result<StreamPara
     Ok(StreamParameters {
         position: (logical.x, logical.y),
         size: logical_size(logical)?,
+        mapping_id: None,
     })
 }
 
