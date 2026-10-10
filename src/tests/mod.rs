@@ -7,6 +7,7 @@ mod server;
 mod animations;
 mod floating;
 mod fullscreen;
+mod image_copy_capture;
 mod layer_shell;
 mod remove_output;
 mod transactions;
