@@ -978,8 +978,10 @@ pub enum Action {
     },
     /// Revoke all current synthetic input.
     ///
-    /// Virtual pointers stop working, clients with virtual keyboards are disconnected, and
-    /// RemoteDesktop sessions are closed.
+    /// Buttons, keys and touch points held by virtual pointers and RemoteDesktop are released
+    /// (keys held by virtual keyboards bypass niri and cannot be released). Virtual pointers stop
+    /// working, clients with virtual keyboards are disconnected, and RemoteDesktop sessions are
+    /// closed.
     RevokeVirtualInput {},
     /// Toggle refusing new synthetic input.
     ///

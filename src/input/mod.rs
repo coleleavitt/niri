@@ -2355,10 +2355,10 @@ impl State {
                 }
             }
             Action::RevokeVirtualInput => {
-                self.niri.revoke_virtual_input();
+                self.revoke_virtual_input();
             }
             Action::ToggleVirtualInputBlocked => {
-                self.niri.toggle_virtual_input_blocked();
+                self.toggle_virtual_input_blocked();
             }
             Action::MruConfirm => {
                 self.confirm_mru();

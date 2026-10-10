@@ -356,6 +356,8 @@ binds {
 Take control back from synthetic input (virtual pointers, virtual keyboards, and RemoteDesktop sessions).
 
 - `revoke-virtual-input`: stops all current synthetic input.
+Pointer buttons held by virtual pointers or RemoteDesktop are released, and keys and touch points held by RemoteDesktop are lifted.
+Keys held by virtual keyboards go to applications directly, bypassing niri, so niri cannot release them.
 Virtual pointers stop working, clients that created a virtual keyboard are disconnected (niri cannot stop a virtual keyboard alone), and RemoteDesktop sessions are closed.
 Programs can create new synthetic input afterwards.
 - `toggle-virtual-input-blocked`: refuses new synthetic input until toggled again.

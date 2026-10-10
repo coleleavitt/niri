@@ -1,5 +1,6 @@
 use niri_config::Action;
 use niri_ipc::VirtualInput;
+use wayland_client::protocol::wl_pointer::ButtonState;
 
 use super::*;
 
@@ -47,6 +48,22 @@ fn virtual_pointer_activity_and_revoke() {
     let state = virtual_input(&mut f);
     assert_eq!(state.virtual_pointers, 1);
     assert!(state.active);
+}
+
+#[test]
+fn revoke_releases_virtual_pointer_buttons() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+
+    let pointer = f.client(id).create_virtual_pointer();
+    pointer.button(0, 0x110, ButtonState::Pressed);
+    pointer.frame();
+    f.roundtrip(id);
+    assert!(f.niri().seat.get_pointer().unwrap().is_grabbed());
+
+    f.niri_state().do_action(Action::RevokeVirtualInput, false);
+    assert!(!f.niri().seat.get_pointer().unwrap().is_grabbed());
 }
 
 #[test]

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::drm::DrmNode;
-use smithay::backend::input::{InputEvent, TabletToolDescriptor};
+use smithay::backend::input::{InputEvent, PointerButtonEvent as _, TabletToolDescriptor};
 use smithay::desktop::{PopupKind, PopupManager};
 use smithay::input::dnd::{self, DnDGrab, DndGrabHandler, DndTarget};
 use smithay::input::pointer::{self, CursorIcon, CursorImageStatus, Focus, PointerHandle};
@@ -757,6 +757,9 @@ impl VirtualPointerHandler for State {
 
     fn on_virtual_pointer_button(&mut self, event: VirtualPointerButtonEvent) {
         self.niri.virtual_input_activity();
+        self.niri
+            .virtual_input
+            .track_button(event.button_code(), event.state());
         self.process_input_event(InputEvent::<VirtualPointerInputBackend>::PointerButton { event });
     }
 

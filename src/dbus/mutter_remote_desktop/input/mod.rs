@@ -118,6 +118,21 @@ pub fn dispatch_to_niri(state: &mut State, msg: RemoteDesktopToNiri) {
         _ => (),
     }
 
+    let tracker = &mut state.niri.virtual_input;
+    match &msg {
+        RemoteDesktopToNiri::KeyboardKeycode {
+            keycode,
+            state: key_state,
+        } => tracker.track_key(*keycode, *key_state),
+        RemoteDesktopToNiri::PointerButton {
+            button,
+            state: button_state,
+        } => tracker.track_button(*button, *button_state),
+        RemoteDesktopToNiri::TouchDown { slot, .. } => tracker.track_touch(*slot, true),
+        RemoteDesktopToNiri::TouchUp { slot } => tracker.track_touch(*slot, false),
+        _ => (),
+    }
+
     let time_msec = event_time_msec();
 
     match msg {
@@ -231,6 +246,39 @@ pub fn dispatch_to_niri(state: &mut State, msg: RemoteDesktopToNiri) {
             });
             dispatch_touch_frame(state, time_msec);
         }
+    }
+}
+
+/// Releases keys and lifts touch points that RemoteDesktop input still holds.
+pub fn release_held_input(
+    state: &mut State,
+    keys: impl IntoIterator<Item = Keycode>,
+    touch_slots: impl IntoIterator<Item = u32>,
+) {
+    let time_msec = event_time_msec();
+
+    for keycode in keys {
+        state.process_input_event(InputEvent::<RemoteDesktopInputBackend>::Keyboard {
+            event: RemoteDesktopKeyboardEvent {
+                base: RemoteDesktopEventBase::keyboard(time_msec),
+                keycode,
+                state: KeyState::Released,
+            },
+        });
+    }
+
+    let mut lifted = false;
+    for slot in touch_slots {
+        state.process_input_event(InputEvent::<RemoteDesktopInputBackend>::TouchUp {
+            event: RemoteDesktopTouchSlotEvent {
+                base: RemoteDesktopEventBase::touch(time_msec, None),
+                slot,
+            },
+        });
+        lifted = true;
+    }
+    if lifted {
+        dispatch_touch_frame(state, time_msec);
     }
 }
 

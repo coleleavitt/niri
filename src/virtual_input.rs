@@ -1,11 +1,16 @@
 //! Tracking of synthetic input (virtual pointers, virtual keyboards, RemoteDesktop).
 
+use std::collections::HashSet;
+use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::RegistrationToken;
+use smithay::backend::input::ButtonState;
+#[cfg(feature = "xdp-gnome-screencast")]
+use smithay::backend::input::{KeyState, Keycode};
 use smithay::backend::renderer::element::{Id, Kind};
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::Color32F;
@@ -14,9 +19,10 @@ use smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::server:
     self, ZwpVirtualKeyboardManagerV1,
 };
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::Rectangle;
+use smithay::input::pointer::ButtonEvent;
+use smithay::utils::{Rectangle, SERIAL_COUNTER};
 
-use crate::niri::Niri;
+use crate::niri::{Niri, State};
 use crate::render_helpers::solid_color::SolidColorRenderElement;
 use crate::utils::{get_monotonic_time, output_size};
 
@@ -27,6 +33,14 @@ pub struct VirtualInputTracker {
     idle_timer: Option<RegistrationToken>,
     /// One virtual keyboard manager per client that created a virtual keyboard.
     keyboard_managers: Vec<ZwpVirtualKeyboardManagerV1>,
+    /// Pointer buttons held by virtual pointers and RemoteDesktop.
+    held_buttons: HashSet<u32>,
+    /// Keys held by RemoteDesktop.
+    #[cfg(feature = "xdp-gnome-screencast")]
+    held_keys: HashSet<Keycode>,
+    /// Touch points held by RemoteDesktop.
+    #[cfg(feature = "xdp-gnome-screencast")]
+    held_touch_slots: HashSet<u32>,
     indicator_ids: [Id; 4],
     indicator_commit: CommitCounter,
 }
@@ -39,6 +53,11 @@ impl VirtualInputTracker {
             last_activity: None,
             idle_timer: None,
             keyboard_managers: Vec::new(),
+            held_buttons: HashSet::new(),
+            #[cfg(feature = "xdp-gnome-screencast")]
+            held_keys: HashSet::new(),
+            #[cfg(feature = "xdp-gnome-screencast")]
+            held_touch_slots: HashSet::new(),
             indicator_ids: [Id::new(), Id::new(), Id::new(), Id::new()],
             indicator_commit: CommitCounter::default(),
         }
@@ -65,6 +84,30 @@ impl VirtualInputTracker {
             .any(|m| m.client().map(|c| c.id()) == client)
         {
             self.keyboard_managers.push(manager.clone());
+        }
+    }
+
+    pub fn track_button(&mut self, button: u32, state: ButtonState) {
+        match state {
+            ButtonState::Pressed => self.held_buttons.insert(button),
+            ButtonState::Released => self.held_buttons.remove(&button),
+        };
+    }
+
+    #[cfg(feature = "xdp-gnome-screencast")]
+    pub fn track_key(&mut self, keycode: Keycode, state: KeyState) {
+        match state {
+            KeyState::Pressed => self.held_keys.insert(keycode),
+            KeyState::Released => self.held_keys.remove(&keycode),
+        };
+    }
+
+    #[cfg(feature = "xdp-gnome-screencast")]
+    pub fn track_touch(&mut self, slot: u32, down: bool) {
+        if down {
+            self.held_touch_slots.insert(slot);
+        } else {
+            self.held_touch_slots.remove(&slot);
         }
     }
 
@@ -120,48 +163,6 @@ impl Niri {
         self.virtual_input_activity();
     }
 
-    /// Stops all current synthetic input.
-    ///
-    /// Virtual pointers become inert. Virtual keyboards cannot be made inert, so their clients
-    /// are disconnected. RemoteDesktop sessions are closed.
-    pub fn revoke_virtual_input(&mut self) {
-        self.virtual_pointer_state.revoke_all();
-
-        for manager in self.virtual_input.keyboard_managers.drain(..) {
-            if manager.is_alive() {
-                manager.post_error(
-                    zwp_virtual_keyboard_manager_v1::Error::Unauthorized,
-                    "virtual input was revoked",
-                );
-            }
-        }
-
-        #[cfg(feature = "xdp-gnome-screencast")]
-        if let Some(dbus) = &self.dbus {
-            if let (Some(conn), Some(sessions)) =
-                (&dbus.conn_remote_desktop, &dbus.remote_desktop_sessions)
-            {
-                crate::dbus::mutter_remote_desktop::close_sessions(conn, sessions);
-            }
-        }
-
-        if let Some(token) = self.virtual_input.idle_timer.take() {
-            self.event_loop.remove(token);
-        }
-        if self.virtual_input.active {
-            self.virtual_input.active = false;
-            self.queue_redraw_all();
-        }
-    }
-
-    pub fn toggle_virtual_input_blocked(&mut self) {
-        let blocked = !self.virtual_input.is_blocked();
-        self.virtual_input.blocked.store(blocked, Ordering::Relaxed);
-        if blocked {
-            self.revoke_virtual_input();
-        }
-    }
-
     pub fn virtual_input_state(&self) -> niri_ipc::VirtualInput {
         let tracker = &self.virtual_input;
 
@@ -213,5 +214,87 @@ impl Niri {
             .map(move |(id, rect)| {
                 SolidColorRenderElement::new(id, rect, commit, color, Kind::Unspecified)
             })
+    }
+}
+
+impl State {
+    /// Stops all current synthetic input.
+    ///
+    /// Releases buttons, keys and touch points that synthetic input still holds. Virtual
+    /// pointers become inert. Virtual keyboards cannot be made inert, so their clients are
+    /// disconnected. RemoteDesktop sessions are closed.
+    pub fn revoke_virtual_input(&mut self) {
+        self.release_held_virtual_input();
+
+        let niri = &mut self.niri;
+        niri.virtual_pointer_state.revoke_all();
+
+        for manager in niri.virtual_input.keyboard_managers.drain(..) {
+            if manager.is_alive() {
+                manager.post_error(
+                    zwp_virtual_keyboard_manager_v1::Error::Unauthorized,
+                    "virtual input was revoked",
+                );
+            }
+        }
+
+        #[cfg(feature = "xdp-gnome-screencast")]
+        if let Some(dbus) = &niri.dbus {
+            if let (Some(conn), Some(sessions)) =
+                (&dbus.conn_remote_desktop, &dbus.remote_desktop_sessions)
+            {
+                crate::dbus::mutter_remote_desktop::close_sessions(conn, sessions);
+            }
+        }
+
+        if let Some(token) = niri.virtual_input.idle_timer.take() {
+            niri.event_loop.remove(token);
+        }
+        if niri.virtual_input.active {
+            niri.virtual_input.active = false;
+            niri.queue_redraw_all();
+        }
+    }
+
+    pub fn toggle_virtual_input_blocked(&mut self) {
+        let blocked = !self.niri.virtual_input.is_blocked();
+        if blocked {
+            self.revoke_virtual_input();
+        }
+        self.niri
+            .virtual_input
+            .blocked
+            .store(blocked, Ordering::Relaxed);
+    }
+
+    fn release_held_virtual_input(&mut self) {
+        let buttons = mem::take(&mut self.niri.virtual_input.held_buttons);
+        if !buttons.is_empty() {
+            let pointer = self.niri.seat.get_pointer().unwrap();
+            let time = get_monotonic_time().as_millis() as u32;
+            for button in buttons {
+                // The press triggered a bind and never reached the pointer.
+                if self.niri.suppressed_buttons.remove(&button) {
+                    continue;
+                }
+
+                let event = ButtonEvent {
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                    button,
+                    state: ButtonState::Released,
+                };
+                pointer.button(self, &event);
+            }
+            pointer.frame(self);
+        }
+
+        #[cfg(feature = "xdp-gnome-screencast")]
+        {
+            let tracker = &mut self.niri.virtual_input;
+            let keys = mem::take(&mut tracker.held_keys);
+            let touch_slots = mem::take(&mut tracker.held_touch_slots);
+            crate::dbus::mutter_remote_desktop::release_held_input(self, keys, touch_slots);
+        }
     }
 }
