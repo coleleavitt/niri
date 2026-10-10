@@ -4,12 +4,30 @@ use std::fmt;
 use std::fmt::Write as _;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use calloop::EventLoop;
 use calloop_wayland_source::WaylandSource;
 use single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1;
+use smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::{
+    self, ExtForeignToplevelHandleV1,
+};
+use smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_list_v1::{
+    self, ExtForeignToplevelListV1,
+};
+use smithay::reexports::wayland_protocols::ext::image_capture_source::v1::client::ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1;
+use smithay::reexports::wayland_protocols::ext::image_capture_source::v1::client::ext_image_capture_source_v1::ExtImageCaptureSourceV1;
+use smithay::reexports::wayland_protocols::ext::image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1;
+use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_frame_v1::{
+    self, ExtImageCopyCaptureFrameV1,
+};
+use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::{
+    self, ExtImageCopyCaptureManagerV1,
+};
+use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_session_v1::{
+    self, ExtImageCopyCaptureSessionV1,
+};
 use smithay::reexports::wayland_protocols::wp::pointer_warp::v1::client::wp_pointer_warp_v1::WpPointerWarpV1;
 use smithay::reexports::wayland_protocols::wp::single_pixel_buffer;
 use smithay::reexports::wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
@@ -36,9 +54,12 @@ use wayland_client::protocol::wl_display::WlDisplay;
 use wayland_client::protocol::wl_output::{self, WlOutput};
 use wayland_client::protocol::wl_pointer::{self, WlPointer};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
+use wayland_client::protocol::wl_shm;
 use wayland_client::protocol::wl_seat::{self, WlSeat};
 use wayland_client::protocol::wl_surface::{self, WlSurface};
-use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
+use wayland_client::{
+    event_created_child, Connection, Dispatch, Proxy, QueueHandle, WEnum,
+};
 
 use crate::utils::id::IdCounter;
 
@@ -54,6 +75,7 @@ pub struct Client {
 pub struct State {
     pub qh: QueueHandle<State>,
 
+    pub registry: WlRegistry,
     pub globals: Vec<Global>,
     pub outputs: HashMap<WlOutput, String>,
 
@@ -74,6 +96,28 @@ pub struct State {
 
     pub windows: Vec<Window>,
     pub layers: Vec<LayerSurface>,
+    pub foreign_toplevels: Vec<ForeignToplevel>,
+}
+
+pub struct ForeignToplevel {
+    pub handle: ExtForeignToplevelHandleV1,
+    pub identifier: Option<String>,
+    pub closed: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct CaptureSessionEvents {
+    pub buffer_size: Option<(u32, u32)>,
+    pub shm_formats: Vec<wl_shm::Format>,
+    pub dmabuf_device: bool,
+    pub done: usize,
+    pub stopped: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct CaptureFrameEvents {
+    pub ready: bool,
+    pub failed: Option<ext_image_copy_capture_frame_v1::FailureReason>,
 }
 
 pub struct Window {
@@ -185,11 +229,12 @@ impl Client {
             .unwrap();
 
         let display = connection.display();
-        let _registry = display.get_registry(&qh, ());
+        let registry = display.get_registry(&qh, ());
         connection.flush().unwrap();
 
         let state = State {
             qh: qh.clone(),
+            registry,
             globals: Vec::new(),
             outputs: HashMap::new(),
             compositor: None,
@@ -206,6 +251,7 @@ impl Client {
             virtual_keyboard_manager: None,
             windows: Vec::new(),
             layers: Vec::new(),
+            foreign_toplevels: Vec::new(),
         };
 
         Self {
@@ -254,6 +300,59 @@ impl Client {
 
     pub fn layer(&mut self, surface: &WlSurface) -> &mut LayerSurface {
         self.state.layer(surface)
+    }
+
+    pub fn has_global<I: Proxy>(&self) -> bool {
+        let name = I::interface().name;
+        self.state.globals.iter().any(|g| g.interface == name)
+    }
+
+    /// Binds a global that the client does not bind on startup.
+    pub fn bind<I>(&self) -> I
+    where
+        I: Proxy + 'static,
+        State: Dispatch<I, ()>,
+    {
+        let name = I::interface().name;
+        let global = self.state.globals.iter().find(|g| g.interface == name);
+        let global = global.unwrap_or_else(|| panic!("no {name} global"));
+        let version = min(global.version, I::interface().version);
+        let proxy = self.state.registry.bind(global.name, version, &self.qh, ());
+        self.connection.flush().unwrap();
+        proxy
+    }
+
+    pub fn create_capture_session(
+        &self,
+        manager: &ExtImageCopyCaptureManagerV1,
+        source: &ExtImageCaptureSourceV1,
+    ) -> (
+        ExtImageCopyCaptureSessionV1,
+        Arc<Mutex<CaptureSessionEvents>>,
+    ) {
+        let events = Arc::new(Mutex::new(CaptureSessionEvents::default()));
+        let options = ext_image_copy_capture_manager_v1::Options::empty();
+        let session = manager.create_session(source, options, &self.qh, events.clone());
+        self.connection.flush().unwrap();
+        (session, events)
+    }
+
+    pub fn create_capture_frame(
+        &self,
+        session: &ExtImageCopyCaptureSessionV1,
+    ) -> (ExtImageCopyCaptureFrameV1, Arc<Mutex<CaptureFrameEvents>>) {
+        let events = Arc::new(Mutex::new(CaptureFrameEvents::default()));
+        let frame = session.create_frame(&self.qh, events.clone());
+        self.connection.flush().unwrap();
+        (frame, events)
+    }
+
+    pub fn foreign_toplevel(&self, identifier: &str) -> &ForeignToplevel {
+        self.state
+            .foreign_toplevels
+            .iter()
+            .find(|t| t.identifier.as_deref() == Some(identifier))
+            .unwrap()
     }
 
     pub fn create_pointer(&mut self) {
@@ -829,6 +928,138 @@ impl Dispatch<WpViewport, ()> for State {
         _qhandle: &QueueHandle<Self>,
     ) {
         unreachable!()
+    }
+}
+
+macro_rules! no_events {
+    ($($ty:ty),* $(,)?) => {$(
+        impl Dispatch<$ty, ()> for State {
+            fn event(
+                _state: &mut Self,
+                _proxy: &$ty,
+                _event: <$ty as Proxy>::Event,
+                _data: &(),
+                _conn: &Connection,
+                _qhandle: &QueueHandle<Self>,
+            ) {
+                unreachable!()
+            }
+        }
+    )*};
+}
+
+no_events!(
+    ExtImageCopyCaptureManagerV1,
+    ExtOutputImageCaptureSourceManagerV1,
+    ExtForeignToplevelImageCaptureSourceManagerV1,
+    ExtImageCaptureSourceV1,
+);
+
+impl Dispatch<ExtForeignToplevelListV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _proxy: &ExtForeignToplevelListV1,
+        event: <ExtForeignToplevelListV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_foreign_toplevel_list_v1::Event::Toplevel { toplevel } => {
+                state.foreign_toplevels.push(ForeignToplevel {
+                    handle: toplevel,
+                    identifier: None,
+                    closed: false,
+                });
+            }
+            ext_foreign_toplevel_list_v1::Event::Finished => (),
+            _ => unreachable!(),
+        }
+    }
+
+    event_created_child!(State, ExtForeignToplevelListV1, [
+        ext_foreign_toplevel_list_v1::EVT_TOPLEVEL_OPCODE => (ExtForeignToplevelHandleV1, ()),
+    ]);
+}
+
+impl Dispatch<ExtForeignToplevelHandleV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        handle: &ExtForeignToplevelHandleV1,
+        event: <ExtForeignToplevelHandleV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        let toplevel = state
+            .foreign_toplevels
+            .iter_mut()
+            .find(|t| t.handle == *handle)
+            .unwrap();
+
+        match event {
+            ext_foreign_toplevel_handle_v1::Event::Identifier { identifier } => {
+                toplevel.identifier = Some(identifier);
+            }
+            ext_foreign_toplevel_handle_v1::Event::Closed => toplevel.closed = true,
+            ext_foreign_toplevel_handle_v1::Event::Done => (),
+            ext_foreign_toplevel_handle_v1::Event::Title { .. } => (),
+            ext_foreign_toplevel_handle_v1::Event::AppId { .. } => (),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<ExtImageCopyCaptureSessionV1, Arc<Mutex<CaptureSessionEvents>>> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ExtImageCopyCaptureSessionV1,
+        event: <ExtImageCopyCaptureSessionV1 as Proxy>::Event,
+        data: &Arc<Mutex<CaptureSessionEvents>>,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        let mut data = data.lock().unwrap();
+        match event {
+            ext_image_copy_capture_session_v1::Event::BufferSize { width, height } => {
+                data.buffer_size = Some((width, height));
+            }
+            ext_image_copy_capture_session_v1::Event::ShmFormat { format } => {
+                if let WEnum::Value(format) = format {
+                    data.shm_formats.push(format);
+                }
+            }
+            ext_image_copy_capture_session_v1::Event::DmabufDevice { .. } => {
+                data.dmabuf_device = true;
+            }
+            ext_image_copy_capture_session_v1::Event::DmabufFormat { .. } => (),
+            ext_image_copy_capture_session_v1::Event::Done => data.done += 1,
+            ext_image_copy_capture_session_v1::Event::Stopped => data.stopped = true,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<ExtImageCopyCaptureFrameV1, Arc<Mutex<CaptureFrameEvents>>> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ExtImageCopyCaptureFrameV1,
+        event: <ExtImageCopyCaptureFrameV1 as Proxy>::Event,
+        data: &Arc<Mutex<CaptureFrameEvents>>,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        let mut data = data.lock().unwrap();
+        match event {
+            ext_image_copy_capture_frame_v1::Event::Ready => data.ready = true,
+            ext_image_copy_capture_frame_v1::Event::Failed { reason } => {
+                data.failed = reason.into_result().ok();
+            }
+            ext_image_copy_capture_frame_v1::Event::Transform { .. } => (),
+            ext_image_copy_capture_frame_v1::Event::Damage { .. } => (),
+            ext_image_copy_capture_frame_v1::Event::PresentationTime { .. } => (),
+            _ => unreachable!(),
+        }
     }
 }
 

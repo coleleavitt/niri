@@ -88,6 +88,17 @@ impl ForeignToplevelManagerState {
             toplevels: HashMap::new(),
         }
     }
+
+    /// Returns the window ID behind an `ext_foreign_toplevel_handle_v1`, if it is still open.
+    pub fn window_id_for_ext_handle(
+        &self,
+        handle: &ExtForeignToplevelHandleV1,
+    ) -> Option<MappedId> {
+        self.toplevels
+            .values()
+            .find(|data| data.ext_list_instances.contains(handle))
+            .map(|data| data.identifier)
+    }
 }
 
 pub fn refresh(state: &mut State) {
