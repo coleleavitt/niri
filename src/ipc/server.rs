@@ -27,7 +27,7 @@ use smithay::input::pointer::{
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
 use smithay::reexports::rustix::fs::unlink;
-use smithay::utils::SERIAL_COUNTER;
+use smithay::utils::{Point, SERIAL_COUNTER};
 use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer};
 
 use crate::backend::IpcOutputMap;
@@ -456,6 +456,16 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             let state = ctx.event_stream_state.borrow();
             let casts = state.casts.casts.values().cloned().collect();
             Response::Casts(casts)
+        }
+        Request::WindowAt { x, y } => {
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                let hit = state.niri.window_at(Point::from((x, y)));
+                let _ = tx.send_blocking(hit);
+            });
+            let result = rx.recv().await;
+            let hit = result.map_err(|_| String::from("error hit testing"))?;
+            Response::WindowAt(hit)
         }
     };
 

@@ -3741,6 +3741,45 @@ impl Niri {
         rv
     }
 
+    /// Hit tests the given point for IPC, consistently with pointer input.
+    pub fn window_at(&self, pos: Point<f64, Logical>) -> niri_ipc::PointHit {
+        let contents = self.contents_under(pos);
+
+        let mut window_id = None;
+        let mut window_local = None;
+        if let Some((window, hit)) = &contents.window {
+            let toplevel = window.toplevel().expect("no X11 support");
+            if let Some((mapped, _)) = self.layout.find_window_and_output(toplevel.wl_surface()) {
+                window_id = Some(mapped.id().get());
+            }
+
+            if let (HitType::Input { win_pos }, Some(output)) = (hit, &contents.output) {
+                let output_loc = self.global_space.output_geometry(output).unwrap().loc;
+                let geo_loc = *win_pos + window.geometry().loc.to_f64() + output_loc.to_f64();
+                let local = pos - geo_loc;
+                window_local = Some((local.x, local.y));
+            }
+        }
+
+        let layer = contents.layer.as_ref().map(|surface| niri_ipc::LayerHit {
+            namespace: surface.namespace().to_owned(),
+            layer: match surface.layer() {
+                Layer::Background => niri_ipc::Layer::Background,
+                Layer::Bottom => niri_ipc::Layer::Bottom,
+                Layer::Top => niri_ipc::Layer::Top,
+                Layer::Overlay => niri_ipc::Layer::Overlay,
+            },
+        });
+
+        niri_ipc::PointHit {
+            output: contents.output.as_ref().map(|output| output.name()),
+            window_id,
+            window_local,
+            is_input: contents.surface.is_some(),
+            layer,
+        }
+    }
+
     pub fn output_under_cursor(&self) -> Option<Output> {
         let pos = self.seat.get_pointer().unwrap().current_location();
         self.global_space.output_under(pos).next().cloned()

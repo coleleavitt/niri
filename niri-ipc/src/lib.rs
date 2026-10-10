@@ -119,6 +119,16 @@ pub enum Request {
     OverviewState,
     /// Request information about screencasts.
     Casts,
+    /// Hit test at a point using the compositor's input hit-testing.
+    ///
+    /// Reports what a pointer click at this point would hit: a window, a layer-shell surface, or
+    /// nothing.
+    WindowAt {
+        /// X coordinate in the global logical coordinate space.
+        x: f64,
+        /// Y coordinate in the global logical coordinate space.
+        y: f64,
+    },
 }
 
 /// Reply from niri to client.
@@ -165,6 +175,8 @@ pub enum Response {
     OverviewState(Overview),
     /// Information about screencasts.
     Casts(Vec<Cast>),
+    /// Result of a hit test.
+    WindowAt(PointHit),
 }
 
 /// Overview information.
@@ -173,6 +185,37 @@ pub enum Response {
 pub struct Overview {
     /// Whether the overview is currently open.
     pub is_open: bool,
+}
+
+/// Result of a hit test at a point.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct PointHit {
+    /// Name of the output under the point.
+    pub output: Option<String>,
+    /// Id of the topmost window under the point.
+    pub window_id: Option<u64>,
+    /// The point relative to the window geometry origin, in logical pixels.
+    ///
+    /// Set only when `is_input` is `true` for a window hit.
+    pub window_local: Option<(f64, f64)>,
+    /// Whether a client surface under the point receives pointer input.
+    ///
+    /// For a window, `false` means the point only activates it, for example on the focus ring,
+    /// border, tab indicator, or when the overview is open.
+    pub is_input: bool,
+    /// The layer-shell surface on top under the point.
+    pub layer: Option<LayerHit>,
+}
+
+/// A layer-shell surface found by a hit test.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct LayerHit {
+    /// Namespace provided by the layer-shell client.
+    pub namespace: String,
+    /// Layer that the surface is on.
+    pub layer: Layer,
 }
 
 /// Color picked from the screen.

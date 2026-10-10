@@ -8,7 +8,7 @@ use niri_config::OutputName;
 use niri_ipc::socket::Socket;
 use niri_ipc::{
     Action, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, Mode, Output,
-    OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowLayout,
+    OutputConfigChanged, Overview, PointHit, Request, Response, Transform, Window, WindowLayout,
 };
 use serde_json::json;
 
@@ -59,6 +59,7 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         Msg::RequestError => Request::ReturnError,
         Msg::OverviewState => Request::OverviewState,
         Msg::Casts => Request::Casts,
+        Msg::WindowAt { x, y } => Request::WindowAt { x: *x, y: *y },
     };
 
     let mut socket = Socket::connect().context("error connecting to the niri socket")?;
@@ -565,6 +566,19 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                 println!();
             }
         }
+        Msg::WindowAt { .. } => {
+            let Response::WindowAt(hit) = response else {
+                bail!("unexpected response: expected WindowAt, got {response:?}");
+            };
+
+            if json {
+                let hit = serde_json::to_string(&hit).context("error formatting response")?;
+                println!("{hit}");
+                return Ok(());
+            }
+
+            print_point_hit(&hit);
+        }
     }
 
     Ok(())
@@ -830,6 +844,38 @@ fn print_cast(cast: &Cast) {
 
     if let Some(node_id) = cast.pw_node_id {
         println!("  PipeWire node ID: {node_id}");
+    }
+}
+
+fn print_point_hit(hit: &PointHit) {
+    let Some(output) = &hit.output else {
+        println!("No output at this point.");
+        return;
+    };
+    println!("Output: \"{output}\"");
+
+    if let Some(layer) = &hit.layer {
+        println!(
+            "Layer surface: \"{}\" on the {:?} layer",
+            layer.namespace, layer.layer
+        );
+    }
+
+    if let Some(id) = hit.window_id {
+        let input = if hit.is_input { "" } else { " (activate only)" };
+        println!("Window ID: {id}{input}");
+    }
+
+    if let Some((x, y)) = hit.window_local {
+        println!(
+            "Window-local position: {}, {}",
+            fmt_rounded(x),
+            fmt_rounded(y)
+        );
+    }
+
+    if hit.window_id.is_none() && hit.layer.is_none() {
+        println!("Nothing under this point.");
     }
 }
 
