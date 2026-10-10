@@ -10,6 +10,7 @@ use std::time::Duration;
 use calloop::EventLoop;
 use calloop_wayland_source::WaylandSource;
 use single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1;
+use smithay::reexports::wayland_protocols::wp::pointer_warp::v1::client::wp_pointer_warp_v1::WpPointerWarpV1;
 use smithay::reexports::wayland_protocols::wp::single_pixel_buffer;
 use smithay::reexports::wayland_protocols::wp::viewporter::client::wp_viewport::WpViewport;
 use smithay::reexports::wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
@@ -33,8 +34,9 @@ use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_display::WlDisplay;
 use wayland_client::protocol::wl_output::{self, WlOutput};
+use wayland_client::protocol::wl_pointer::{self, WlPointer};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
-use wayland_client::protocol::wl_seat::WlSeat;
+use wayland_client::protocol::wl_seat::{self, WlSeat};
 use wayland_client::protocol::wl_surface::{self, WlSurface};
 use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
 
@@ -61,6 +63,12 @@ pub struct State {
     pub spbm: Option<WpSinglePixelBufferManagerV1>,
     pub viewporter: Option<WpViewporter>,
     pub seat: Option<WlSeat>,
+    pub pointer_warp: Option<WpPointerWarpV1>,
+
+    pub pointer: Option<WlPointer>,
+    /// Surface with pointer focus and the serial of its enter event.
+    pub pointer_focus: Option<(WlSurface, u32)>,
+    pub pointer_location: (f64, f64),
     pub virtual_pointer_manager: Option<ZwlrVirtualPointerManagerV1>,
     pub virtual_keyboard_manager: Option<ZwpVirtualKeyboardManagerV1>,
 
@@ -190,6 +198,10 @@ impl Client {
             spbm: None,
             viewporter: None,
             seat: None,
+            pointer_warp: None,
+            pointer: None,
+            pointer_focus: None,
+            pointer_location: (0., 0.),
             virtual_pointer_manager: None,
             virtual_keyboard_manager: None,
             windows: Vec::new(),
@@ -242,6 +254,17 @@ impl Client {
 
     pub fn layer(&mut self, surface: &WlSurface) -> &mut LayerSurface {
         self.state.layer(surface)
+    }
+
+    pub fn create_pointer(&mut self) {
+        let seat = self.state.seat.as_ref().unwrap();
+        self.state.pointer = Some(seat.get_pointer(&self.qh, ()));
+    }
+
+    pub fn warp_pointer(&self, surface: &WlSurface, x: f64, y: f64, serial: u32) {
+        let pointer_warp = self.state.pointer_warp.as_ref().unwrap();
+        let pointer = self.state.pointer.as_ref().unwrap();
+        pointer_warp.warp_pointer(surface, pointer, x, y, serial);
     }
 
     pub fn create_virtual_pointer(&mut self) -> ZwlrVirtualPointerV1 {
@@ -542,6 +565,9 @@ impl Dispatch<WlRegistry, ()> for State {
                 } else if interface == WlSeat::interface().name {
                     let version = min(version, WlSeat::interface().version);
                     state.seat = Some(registry.bind(name, version, qh, ()));
+                } else if interface == WpPointerWarpV1::interface().name {
+                    let version = min(version, WpPointerWarpV1::interface().version);
+                    state.pointer_warp = Some(registry.bind(name, version, qh, ()));
                 } else if interface == ZwlrVirtualPointerManagerV1::interface().name {
                     let version = min(version, ZwlrVirtualPointerManagerV1::interface().version);
                     state.virtual_pointer_manager = Some(registry.bind(name, version, qh, ()));
@@ -810,11 +836,59 @@ impl Dispatch<WlSeat, ()> for State {
     fn event(
         _state: &mut Self,
         _proxy: &WlSeat,
-        _event: <WlSeat as wayland_client::Proxy>::Event,
+        event: <WlSeat as wayland_client::Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
+        match event {
+            wl_seat::Event::Capabilities { .. } => (),
+            wl_seat::Event::Name { .. } => (),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Dispatch<WlPointer, ()> for State {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlPointer,
+        event: <WlPointer as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_pointer::Event::Enter {
+                serial,
+                surface,
+                surface_x,
+                surface_y,
+            } => {
+                state.pointer_focus = Some((surface, serial));
+                state.pointer_location = (surface_x, surface_y);
+            }
+            wl_pointer::Event::Leave { .. } => state.pointer_focus = None,
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => state.pointer_location = (surface_x, surface_y),
+            _ => (),
+        }
+    }
+}
+
+impl Dispatch<WpPointerWarpV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpPointerWarpV1,
+        _event: <WpPointerWarpV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        unreachable!()
     }
 }
 

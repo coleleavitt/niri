@@ -470,6 +470,17 @@ impl<W: LayoutElement> Workspace<W> {
         self.floating.has_window(id)
     }
 
+    /// Returns whether an animation or gesture that can move or resize this window is ongoing.
+    pub fn is_window_animating(&self, id: &W::Id) -> bool {
+        if self.floating.has_window(id) {
+            self.floating
+                .tiles()
+                .any(|tile| tile.window().id() == id && tile.are_transitions_ongoing())
+        } else {
+            self.scrolling.are_transitions_ongoing()
+        }
+    }
+
     pub fn current_output(&self) -> Option<&Output> {
         self.output.as_ref()
     }

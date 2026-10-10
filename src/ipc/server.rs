@@ -27,7 +27,7 @@ use smithay::input::pointer::{
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
 use smithay::reexports::rustix::fs::unlink;
-use smithay::utils::SERIAL_COUNTER;
+use smithay::utils::{Point, SERIAL_COUNTER};
 use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer};
 
 use crate::backend::IpcOutputMap;
@@ -152,7 +152,7 @@ fn socket_dir() -> PathBuf {
         .unwrap_or_else(env::temp_dir)
 }
 
-fn on_new_ipc_client(state: &mut State, stream: UnixStream) {
+pub(crate) fn on_new_ipc_client(state: &mut State, stream: UnixStream) {
     let _span = tracy_client::span!("on_new_ipc_client");
     trace!("new IPC client connected");
 
@@ -457,6 +457,47 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             let casts = state.casts.casts.values().cloned().collect();
             Response::Casts(casts)
         }
+        Request::WindowGeometry { id } => {
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                let niri = &state.niri;
+                let id = id.or_else(|| niri.layout.focus().map(|mapped| mapped.id().get()));
+                let _ = tx.send_blocking((id, id.and_then(|id| niri.window_geometry(id))));
+            });
+            let result = rx.recv().await;
+            let (id, geometry) =
+                result.map_err(|_| String::from("error getting window geometry"))?;
+            let id = id.ok_or_else(|| String::from("no window is focused"))?;
+            let geometry = geometry.ok_or_else(|| format!("window with id {id} not found"))?;
+            Response::WindowGeometry(geometry)
+        }
+        Request::WindowAt { x, y } => {
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                let hit = state.niri.window_at(Point::from((x, y)));
+                let _ = tx.send_blocking(hit);
+            });
+            let result = rx.recv().await;
+            let hit = result.map_err(|_| String::from("error hit testing"))?;
+            Response::WindowAt(hit)
+        }
+        Request::CaptureWindow {
+            id,
+            path,
+            show_pointer,
+        } => {
+            validate_path(&path)?;
+
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                if let Err(err) = state.capture_window(id, path, show_pointer, tx.clone()) {
+                    let _ = tx.send_blocking(Err(err));
+                }
+            });
+            let result = rx.recv().await;
+            let capture = result.map_err(|_| String::from("error capturing window"))??;
+            Response::WindowCaptured(capture)
+        }
         Request::VirtualInputState => {
             let (tx, rx) = async_channel::bounded(1);
             ctx.event_loop.insert_idle(move |state| {
@@ -479,11 +520,7 @@ fn validate_action(action: &Action) -> Result<(), String> {
     | Action::LoadConfigFile { path } = action
     {
         if let Some(path) = path {
-            // Relative paths are resolved against the niri compositor's working directory, which
-            // is almost certainly not what you want.
-            if !Path::new(path).is_absolute() {
-                return Err(format!("path must be absolute: {path}"));
-            }
+            validate_path(path)?;
         }
     }
 
@@ -494,6 +531,15 @@ fn validate_action(action: &Action) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_path(path: &str) -> Result<(), String> {
+    // Relative paths are resolved against the niri compositor's working directory, which is
+    // almost certainly not what you want.
+    if !Path::new(path).is_absolute() {
+        return Err(format!("path must be absolute: {path}"));
+    }
     Ok(())
 }
 
@@ -990,6 +1036,15 @@ mod tests {
         assert_eq!(
             event_stream_buffer_size(initial_events_len),
             initial_events_len
+        );
+    }
+
+    #[test]
+    fn capture_window_requires_absolute_path() {
+        assert!(validate_path("/tmp/window.png").is_ok());
+        assert_eq!(
+            validate_path("window.png"),
+            Err(String::from("path must be absolute: window.png"))
         );
     }
 

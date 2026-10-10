@@ -125,18 +125,21 @@ pub enum Action {
     ScreenshotTogglePointer,
     Screenshot(
         #[knuffel(property(name = "show-pointer"), default = true)] bool,
+        #[knuffel(property(name = "copy-to-clipboard"), default = true)] bool,
         // Path; not settable from knuffel
         Option<String>,
     ),
     ScreenshotScreen(
         #[knuffel(property(name = "write-to-disk"), default = true)] bool,
         #[knuffel(property(name = "show-pointer"), default = true)] bool,
+        #[knuffel(property(name = "copy-to-clipboard"), default = true)] bool,
         // Path; not settable from knuffel
         Option<String>,
     ),
     ScreenshotWindow(
         #[knuffel(property(name = "write-to-disk"), default = true)] bool,
         #[knuffel(property(name = "show-pointer"), default = false)] bool,
+        #[knuffel(property(name = "copy-to-clipboard"), default = true)] bool,
         // Path; not settable from knuffel
         Option<String>,
     ),
@@ -145,6 +148,7 @@ pub enum Action {
         id: u64,
         write_to_disk: bool,
         show_pointer: bool,
+        copy_to_clipboard: bool,
         path: Option<String>,
     },
     ToggleKeyboardShortcutsInhibit,
@@ -407,29 +411,35 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::Spawn { command } => Self::Spawn(command),
             niri_ipc::Action::SpawnSh { command } => Self::SpawnSh(command),
             niri_ipc::Action::DoScreenTransition { delay_ms } => Self::DoScreenTransition(delay_ms),
-            niri_ipc::Action::Screenshot { show_pointer, path } => {
-                Self::Screenshot(show_pointer, path)
-            }
+            niri_ipc::Action::Screenshot {
+                show_pointer,
+                copy_to_clipboard,
+                path,
+            } => Self::Screenshot(show_pointer, copy_to_clipboard, path),
             niri_ipc::Action::ScreenshotScreen {
                 write_to_disk,
                 show_pointer,
+                copy_to_clipboard,
                 path,
-            } => Self::ScreenshotScreen(write_to_disk, show_pointer, path),
+            } => Self::ScreenshotScreen(write_to_disk, show_pointer, copy_to_clipboard, path),
             niri_ipc::Action::ScreenshotWindow {
                 id: None,
                 write_to_disk,
                 show_pointer,
+                copy_to_clipboard,
                 path,
-            } => Self::ScreenshotWindow(write_to_disk, show_pointer, path),
+            } => Self::ScreenshotWindow(write_to_disk, show_pointer, copy_to_clipboard, path),
             niri_ipc::Action::ScreenshotWindow {
                 id: Some(id),
                 write_to_disk,
                 show_pointer,
+                copy_to_clipboard,
                 path,
             } => Self::ScreenshotWindowById {
                 id,
                 write_to_disk,
                 show_pointer,
+                copy_to_clipboard,
                 path,
             },
             niri_ipc::Action::ToggleKeyboardShortcutsInhibit {} => {
@@ -1056,6 +1066,43 @@ impl FromStr for Key {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipc_screenshot_actions_keep_copy_to_clipboard() {
+        assert_eq!(
+            Action::from(niri_ipc::Action::Screenshot {
+                show_pointer: true,
+                copy_to_clipboard: false,
+                path: None,
+            }),
+            Action::Screenshot(true, false, None),
+        );
+        assert_eq!(
+            Action::from(niri_ipc::Action::ScreenshotScreen {
+                write_to_disk: false,
+                show_pointer: true,
+                copy_to_clipboard: false,
+                path: Some(String::from("/tmp/s.png")),
+            }),
+            Action::ScreenshotScreen(false, true, false, Some(String::from("/tmp/s.png"))),
+        );
+        assert_eq!(
+            Action::from(niri_ipc::Action::ScreenshotWindow {
+                id: Some(5),
+                write_to_disk: true,
+                show_pointer: false,
+                copy_to_clipboard: false,
+                path: None,
+            }),
+            Action::ScreenshotWindowById {
+                id: 5,
+                write_to_disk: true,
+                show_pointer: false,
+                copy_to_clipboard: false,
+                path: None,
+            },
+        );
+    }
 
     #[test]
     fn parse_xf86_screensaver() {
