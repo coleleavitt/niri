@@ -13,6 +13,7 @@ use std::time::Duration;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::drm::DrmNode;
 use smithay::backend::input::{InputEvent, TabletToolDescriptor};
+use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::desktop::{PopupKind, PopupManager};
 use smithay::input::dnd::{self, DnDGrab, DndGrabHandler, DndTarget};
 use smithay::input::pointer::{self, CursorIcon, CursorImageStatus, Focus, PointerHandle};
@@ -22,6 +23,7 @@ use smithay::output::Output;
 use smithay::reexports::rustix::fs::{fcntl_setfl, OFlags};
 use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
+use smithay::reexports::wayland_server::protocol::wl_pointer::WlPointer;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, Rectangle, Serial};
@@ -41,6 +43,7 @@ use smithay::wayland::output::OutputHandler;
 use smithay::wayland::pointer_constraints::{
     with_pointer_constraint, PointerConstraint, PointerConstraintsHandler,
 };
+use smithay::wayland::pointer_warp::PointerWarpHandler;
 use smithay::wayland::security_context::{
     SecurityContext, SecurityContextHandler, SecurityContextListenerSource,
 };
@@ -234,6 +237,52 @@ impl PointerConstraintsHandler for State {
             // FIXME: redraw only outputs overlapping the cursor.
             self.niri.queue_redraw_all();
         }
+    }
+}
+
+impl PointerWarpHandler for State {
+    fn warp_pointer(
+        &mut self,
+        surface: WlSurface,
+        _pointer: WlPointer,
+        pos: Point<f64, Logical>,
+        serial: Serial,
+    ) {
+        let pointer = self.niri.seat.get_pointer().unwrap();
+
+        // The current focus includes the implicit grab focus.
+        if pointer.current_focus().as_ref() != Some(&surface)
+            || pointer.last_enter() != Some(serial)
+        {
+            return;
+        }
+
+        let Some(size) = with_renderer_surface_state(&surface, |s| s.surface_size()).flatten()
+        else {
+            return;
+        };
+        if !Rectangle::from_size(size.to_f64()).contains(pos) {
+            return;
+        }
+
+        // During a grab, the client receives coordinates relative to the surface origin at the
+        // start of the grab.
+        let origin = pointer
+            .grab_start_data()
+            .and_then(|data| data.focus)
+            .into_iter()
+            .chain(self.niri.pointer_contents.surface.clone())
+            .find_map(|(s, origin)| (s == surface).then_some(origin));
+        let Some(origin) = origin else {
+            return;
+        };
+
+        let target = origin + pos;
+        if self.niri.output_under(target).is_none() {
+            return;
+        }
+
+        self.move_cursor(target);
     }
 }
 
