@@ -22,7 +22,7 @@ use zbus::{interface, ObjectServer};
 
 pub use self::clipboard::RemoteDesktopClipboardSelection;
 use self::device_types::supported_device_types;
-pub use self::input::{dispatch_to_niri, RemoteDesktopToNiri};
+pub use self::input::{dispatch_to_niri, RemoteDesktopAbsolutePosition, RemoteDesktopToNiri};
 pub use self::registry::{
     RemoteDesktopOutputStream, RemoteDesktopSessionRegistry, RemoteDesktopStream,
 };

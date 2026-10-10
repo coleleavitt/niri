@@ -15,7 +15,7 @@ use zbus::{fdo, interface, ObjectServer};
 use super::clipboard::parse_clipboard_mime_types;
 use super::device_types::RemoteDesktopDeviceTypes;
 use super::eis::RemoteDesktopEisConnection;
-use super::input::{RemoteDesktopPosition, RemoteDesktopToNiri};
+use super::input::{RemoteDesktopAbsolutePosition, RemoteDesktopToNiri};
 use super::keymap::{
     current_keymap, keymap_capabilities, parse_set_keymap_options, RemoteDesktopKeymapChange,
 };
@@ -378,15 +378,13 @@ impl Session {
         }
     }
 
-    fn stream_position(&self, stream: &str, x: f64, y: f64) -> fdo::Result<RemoteDesktopPosition> {
-        let position = self.registry.stream_position(stream, x, y)?;
-        Ok(RemoteDesktopPosition {
-            output_name: position.output_name,
-            x: position.x,
-            y: position.y,
-            width: position.width,
-            height: position.height,
-        })
+    fn stream_position(
+        &self,
+        stream: &str,
+        x: f64,
+        y: f64,
+    ) -> fdo::Result<RemoteDesktopAbsolutePosition> {
+        self.registry.stream_position(stream, x, y)
     }
 
     fn send(&self, msg: RemoteDesktopToNiri) -> fdo::Result<()> {

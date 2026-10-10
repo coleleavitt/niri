@@ -10,11 +10,14 @@ use reis::request::{
 use smithay::backend::input::{AxisSource, ButtonState, KeyState, Keycode};
 
 use super::device_types::RemoteDesktopDeviceTypes;
-use super::input::{dispatch_to_niri, RemoteDesktopAxisFrame, RemoteDesktopPosition};
+use super::input::window::window_stream_size;
+use super::input::{
+    dispatch_to_niri, RemoteDesktopAbsolutePosition, RemoteDesktopAxisFrame, RemoteDesktopPosition,
+};
 use super::keymap::current_keymap_file;
 use super::legacy_input::XKB_KEYCODE_OFFSET;
 use super::registry::{
-    RemoteDesktopOutputRegion, RemoteDesktopSessionRegistry, RemoteDesktopStreamPosition,
+    RemoteDesktopOutputRegion, RemoteDesktopSessionRegistry, RemoteDesktopWindowRegion,
 };
 use crate::dbus::mutter_remote_desktop::RemoteDesktopToNiri;
 use crate::niri::State;
@@ -28,13 +31,20 @@ pub struct RemoteDesktopEisConnection {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct EisOutputRegion {
+struct EisRegion {
     mapping_id: String,
-    output_name: String,
+    target: EisRegionTarget,
     x: u32,
     y: u32,
     width: u32,
     height: u32,
+    scale: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum EisRegionTarget {
+    Output(String),
+    Window(u64),
 }
 
 #[derive(Default)]
@@ -42,7 +52,10 @@ struct RemoteDesktopEisState {
     session_id: String,
     registry: RemoteDesktopSessionRegistry,
     device_types: RemoteDesktopDeviceTypes,
-    regions: Vec<EisOutputRegion>,
+    regions: Vec<EisRegion>,
+    window_regions: Vec<EisRegion>,
+    /// Standalone absolute devices, one per window stream and capability, like Mutter.
+    window_devices: Vec<(Device, EisRegion)>,
     seat: Option<reis::request::Seat>,
     keyboard: Option<Device>,
     pointer: Option<Device>,
@@ -78,6 +91,8 @@ pub fn connect_to_niri(
         registry: connection.registry,
         device_types: connection.device_types,
         regions: Vec::new(),
+        window_regions: Vec::new(),
+        window_devices: Vec::new(),
         seat: None,
         keyboard: None,
         pointer: None,
@@ -105,7 +120,7 @@ impl RemoteDesktopEisState {
     ) -> PostAction {
         let action = match event {
             Ok(EisRequestSourceEvent::Connected) => {
-                self.handle_connected(connection);
+                self.handle_connected(connection, state);
                 PostAction::Continue
             }
             Ok(EisRequestSourceEvent::Request(request)) => {
@@ -125,11 +140,18 @@ impl RemoteDesktopEisState {
         action
     }
 
-    fn handle_connected(&mut self, connection: &Connection) {
+    fn handle_connected(&mut self, connection: &Connection, state: &State) {
         self.regions = match output_regions(&self.registry, &self.session_id) {
             Ok(regions) => regions,
             Err(err) => {
                 warn!("error resolving remote desktop EIS output regions: {err:?}");
+                Vec::new()
+            }
+        };
+        self.window_regions = match self.registry.window_regions(&self.session_id) {
+            Ok(regions) => window_regions(state, &regions),
+            Err(err) => {
+                warn!("error resolving remote desktop EIS window regions: {err:?}");
                 Vec::new()
             }
         };
@@ -171,9 +193,11 @@ impl RemoteDesktopEisState {
                 PostAction::Continue
             }
             EisRequest::PointerMotionAbsolute(event) => {
-                if let Some(position) = self
-                    .absolute_position(f64::from(event.dx_absolute), f64::from(event.dy_absolute))
-                {
+                if let Some(position) = self.absolute_position(
+                    &event.device,
+                    f64::from(event.dx_absolute),
+                    f64::from(event.dy_absolute),
+                ) {
                     dispatch_to_niri(
                         state,
                         RemoteDesktopToNiri::PointerMotionAbsolute { position },
@@ -229,7 +253,7 @@ impl RemoteDesktopEisState {
             }
             EisRequest::TouchDown(event) => {
                 if let Some(position) =
-                    self.absolute_position(f64::from(event.x), f64::from(event.y))
+                    self.absolute_position(&event.device, f64::from(event.x), f64::from(event.y))
                 {
                     dispatch_to_niri(
                         state,
@@ -243,7 +267,7 @@ impl RemoteDesktopEisState {
             }
             EisRequest::TouchMotion(event) => {
                 if let Some(position) =
-                    self.absolute_position(f64::from(event.x), f64::from(event.y))
+                    self.absolute_position(&event.device, f64::from(event.x), f64::from(event.y))
                 {
                     dispatch_to_niri(
                         state,
@@ -315,6 +339,7 @@ impl RemoteDesktopEisState {
                 seat,
                 "niri remote desktop keyboard",
                 DeviceCapability::Keyboard.into(),
+                &[],
             );
         }
 
@@ -328,6 +353,7 @@ impl RemoteDesktopEisState {
                 seat,
                 "niri remote desktop pointer",
                 pointer_capabilities(capabilities),
+                &[],
             );
         }
 
@@ -340,6 +366,17 @@ impl RemoteDesktopEisState {
                 state,
                 seat,
                 "niri remote desktop absolute pointer",
+                pointer_absolute_capabilities(capabilities),
+                &self.regions,
+            );
+        }
+
+        if self.device_types.pointer() && capabilities.contains(DeviceCapability::PointerAbsolute) {
+            self.add_window_devices(
+                connection,
+                state,
+                seat,
+                "niri remote desktop window absolute pointer",
                 pointer_absolute_capabilities(capabilities),
             );
         }
@@ -354,7 +391,51 @@ impl RemoteDesktopEisState {
                 seat,
                 "niri remote desktop touch",
                 DeviceCapability::Touch.into(),
+                &self.regions,
             );
+        }
+
+        if self.device_types.touchscreen() && capabilities.contains(DeviceCapability::Touch) {
+            self.add_window_devices(
+                connection,
+                state,
+                seat,
+                "niri remote desktop window touch",
+                DeviceCapability::Touch.into(),
+            );
+        }
+    }
+
+    fn add_window_devices(
+        &mut self,
+        connection: &Connection,
+        state: &State,
+        seat: &reis::request::Seat,
+        name: &str,
+        capabilities: BitFlags<DeviceCapability>,
+    ) {
+        for region in self.window_regions.clone() {
+            let exists = self.window_devices.iter().any(|(device, existing)| {
+                *existing == region
+                    && capabilities
+                        .iter()
+                        .all(|capability| device.has_capability(capability))
+            });
+            if exists {
+                continue;
+            }
+
+            let device = self.add_device(
+                connection,
+                state,
+                seat,
+                name,
+                capabilities,
+                std::slice::from_ref(&region),
+            );
+            if let Some(device) = device {
+                self.window_devices.push((device, region));
+            }
         }
     }
 
@@ -365,6 +446,7 @@ impl RemoteDesktopEisState {
         seat: &reis::request::Seat,
         name: &str,
         capabilities: BitFlags<DeviceCapability>,
+        regions: &[EisRegion],
     ) -> Option<Device> {
         if capabilities.is_empty() {
             return None;
@@ -373,9 +455,9 @@ impl RemoteDesktopEisState {
         let regions = if capabilities.contains(DeviceCapability::PointerAbsolute)
             || capabilities.contains(DeviceCapability::Touch)
         {
-            self.regions.clone()
+            regions
         } else {
-            Vec::new()
+            &[]
         };
         let keymap_file = if capabilities.contains(DeviceCapability::Keyboard) {
             match current_keymap_file(state) {
@@ -400,11 +482,15 @@ impl RemoteDesktopEisState {
                 }
             }
 
-            for region in &regions {
+            for region in regions {
                 device.device().region_mapping_id(&region.mapping_id);
-                device
-                    .device()
-                    .region(region.x, region.y, region.width, region.height, 1.0);
+                device.device().region(
+                    region.x,
+                    region.y,
+                    region.width,
+                    region.height,
+                    region.scale as f32,
+                );
             }
         });
         device.resumed();
@@ -421,60 +507,77 @@ impl RemoteDesktopEisState {
         clear_matching_device(&mut self.pointer, &request.device);
         clear_matching_device(&mut self.pointer_absolute, &request.device);
         clear_matching_device(&mut self.touch, &request.device);
+        self.window_devices
+            .retain(|(device, _)| *device != request.device);
     }
 
-    fn absolute_position(&self, x: f64, y: f64) -> Option<RemoteDesktopPosition> {
+    fn absolute_position(
+        &self,
+        device: &Device,
+        x: f64,
+        y: f64,
+    ) -> Option<RemoteDesktopAbsolutePosition> {
         if !x.is_finite() || !y.is_finite() {
             warn!("remote desktop EIS absolute coordinates must be finite");
             return None;
         }
 
-        let position = self.regions.iter().find_map(|region| {
+        if let Some((_, region)) = self.window_devices.iter().find(|(d, _)| d == device) {
+            return Some(region.position(x, y));
+        }
+
+        let region = self.regions.iter().find(|region| {
             let region_x = f64::from(region.x);
             let region_y = f64::from(region.y);
-            let width = f64::from(region.width);
-            let height = f64::from(region.height);
-            if x < region_x || y < region_y || x >= region_x + width || y >= region_y + height {
-                return None;
-            }
-
-            Some(RemoteDesktopStreamPosition {
-                output_name: region.output_name.clone(),
-                x: x - region_x,
-                y: y - region_y,
-                width: i32::try_from(region.width).unwrap_or(i32::MAX),
-                height: i32::try_from(region.height).unwrap_or(i32::MAX),
-            })
+            x >= region_x
+                && y >= region_y
+                && x < region_x + f64::from(region.width)
+                && y < region_y + f64::from(region.height)
         });
-
-        let Some(position) = position else {
+        let Some(region) = region else {
             warn!("remote desktop EIS absolute coordinates did not match any output region");
             return None;
         };
 
-        Some(RemoteDesktopPosition {
-            output_name: position.output_name,
-            x: position.x,
-            y: position.y,
-            width: position.width,
-            height: position.height,
-        })
+        Some(region.position(x, y))
+    }
+}
+
+impl EisRegion {
+    fn position(&self, x: f64, y: f64) -> RemoteDesktopAbsolutePosition {
+        let x = x - f64::from(self.x);
+        let y = y - f64::from(self.y);
+        match &self.target {
+            EisRegionTarget::Output(output_name) => {
+                RemoteDesktopAbsolutePosition::Output(RemoteDesktopPosition {
+                    output_name: output_name.clone(),
+                    x,
+                    y,
+                    width: i32::try_from(self.width).unwrap_or(i32::MAX),
+                    height: i32::try_from(self.height).unwrap_or(i32::MAX),
+                })
+            }
+            // Window regions are logical; window stream positions are buffer pixels.
+            EisRegionTarget::Window(id) => RemoteDesktopAbsolutePosition::Window {
+                id: *id,
+                x: x * self.scale,
+                y: y * self.scale,
+            },
+        }
     }
 }
 
 fn output_regions(
     registry: &RemoteDesktopSessionRegistry,
     session_id: &str,
-) -> Result<Vec<EisOutputRegion>, String> {
+) -> Result<Vec<EisRegion>, String> {
     let regions = registry
         .output_regions(session_id)
         .map_err(|err| format!("{err:?}"))?;
     normalize_regions(&regions)
 }
 
-fn normalize_regions(
-    regions: &[RemoteDesktopOutputRegion],
-) -> Result<Vec<EisOutputRegion>, String> {
+fn normalize_regions(regions: &[RemoteDesktopOutputRegion]) -> Result<Vec<EisRegion>, String> {
     let min_x = regions.iter().map(|region| region.x).min().unwrap_or(0);
     let min_y = regions.iter().map(|region| region.y).min().unwrap_or(0);
 
@@ -488,7 +591,7 @@ fn normalize_region(
     region: &RemoteDesktopOutputRegion,
     min_x: i32,
     min_y: i32,
-) -> Result<EisOutputRegion, String> {
+) -> Result<EisRegion, String> {
     let width = u32::try_from(region.width)
         .map_err(|_| format!("output {} has a negative width", region.output_name))?;
     let height = u32::try_from(region.height)
@@ -497,16 +600,65 @@ fn normalize_region(
         return Err(format!("output {} has an empty region", region.output_name));
     }
 
-    Ok(EisOutputRegion {
+    Ok(EisRegion {
         mapping_id: region.mapping_id.to_string(),
-        output_name: region.output_name.clone(),
+        target: EisRegionTarget::Output(region.output_name.clone()),
         x: u32::try_from(region.x - min_x)
             .map_err(|_| format!("output {} has an invalid x offset", region.output_name))?,
         y: u32::try_from(region.y - min_y)
             .map_err(|_| format!("output {} has an invalid y offset", region.output_name))?,
         width,
         height,
+        scale: 1.,
     })
+}
+
+/// Window stream regions in logical pixels at the window's current output scale.
+///
+/// Like output regions, they are not updated when the window resizes; positions are clamped to
+/// the window when they are resolved.
+fn window_regions(state: &State, regions: &[RemoteDesktopWindowRegion]) -> Vec<EisRegion> {
+    regions
+        .iter()
+        .filter_map(|region| {
+            let Some((monitor, mapped)) = state
+                .niri
+                .layout
+                .windows()
+                .find(|(_, mapped)| mapped.id().get() == region.window_id)
+            else {
+                warn!(
+                    "remote desktop EIS window stream {} has no window",
+                    region.mapping_id
+                );
+                return None;
+            };
+            let scale = monitor.map_or(1., |monitor| {
+                monitor.output().current_scale().fractional_scale()
+            });
+            let size = window_stream_size(&mapped.window, scale)
+                .to_f64()
+                .to_logical(scale);
+            Some(window_region(region, size.w, size.h, scale))
+        })
+        .collect()
+}
+
+fn window_region(
+    region: &RemoteDesktopWindowRegion,
+    width: f64,
+    height: f64,
+    scale: f64,
+) -> EisRegion {
+    EisRegion {
+        mapping_id: region.mapping_id.to_string(),
+        target: EisRegionTarget::Window(region.window_id),
+        x: 0,
+        y: 0,
+        width: width.ceil().max(1.) as u32,
+        height: height.ceil().max(1.) as u32,
+        scale,
+    }
 }
 
 fn pointer_capabilities(requested: BitFlags<DeviceCapability>) -> BitFlags<DeviceCapability> {
@@ -626,23 +778,70 @@ mod tests {
         assert_eq!(
             normalized,
             vec![
-                EisOutputRegion {
+                EisRegion {
                     mapping_id: "11".to_owned(),
-                    output_name: "HDMI-A-1".to_owned(),
+                    target: EisRegionTarget::Output("HDMI-A-1".to_owned()),
                     x: 0,
                     y: 120,
                     width: 1920,
                     height: 1080,
+                    scale: 1.,
                 },
-                EisOutputRegion {
+                EisRegion {
                     mapping_id: "12".to_owned(),
-                    output_name: "DP-1".to_owned(),
+                    target: EisRegionTarget::Output("DP-1".to_owned()),
                     x: 1920,
                     y: 0,
                     width: 2560,
                     height: 1440,
+                    scale: 1.,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn eis_window_regions_map_logical_coordinates_to_stream_pixels() {
+        let region = window_region(
+            &RemoteDesktopWindowRegion {
+                mapping_id: 13,
+                window_id: 42,
+            },
+            400.5,
+            300.,
+            1.5,
+        );
+
+        assert_eq!((region.x, region.y), (0, 0));
+        assert_eq!((region.width, region.height), (401, 300));
+        assert_eq!(region.mapping_id, "13");
+        assert!(matches!(
+            region.position(100., 20.),
+            RemoteDesktopAbsolutePosition::Window {
+                id: 42,
+                x: 150.,
+                y: 30.
+            }
+        ));
+    }
+
+    #[test]
+    fn eis_output_regions_map_to_output_local_positions() {
+        let regions = normalize_regions(&[RemoteDesktopOutputRegion {
+            mapping_id: 11,
+            output_name: "HDMI-A-1".to_owned(),
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }])
+        .unwrap();
+
+        let RemoteDesktopAbsolutePosition::Output(position) = regions[0].position(10., 20.) else {
+            panic!("expected an output position");
+        };
+        assert_eq!(position.output_name, "HDMI-A-1");
+        assert_eq!((position.x, position.y), (10., 20.));
+        assert_eq!((position.width, position.height), (1920, 1080));
     }
 }
