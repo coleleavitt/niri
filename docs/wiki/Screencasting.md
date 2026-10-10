@@ -137,6 +137,19 @@ Here's an example showing a windowed-fullscreen Google Slides [presentation](htt
 
 ![Windowed Google Slides presentation, another window showing the presenter view, and another window showing Zoom UI casting the presentation.](https://github.com/user-attachments/assets/b2b49eea-f5a0-4c0a-b537-51fd1949a59d)
 
+### Remote desktop input
+
+Through `xdg-desktop-portal-gnome`, niri also implements the RemoteDesktop portal, which lets apps send pointer, keyboard and touch input together with a screencast.
+
+Absolute pointer and touch positions are relative to the screencast stream.
+For a window stream, they are in the pixels of the window stream and land on the window wherever it currently is, even after it moves or scrolls.
+Positions outside the window are clamped to its edges.
+niri drops the input (and logs a warning) when the window is closed, not on screen, or when the overview is open, and when the position is on a part of the window that is outside its monitor.
+The input goes to whatever is on top at that position, so a window that covers the target window receives it.
+
+Apps using libei get one shared absolute pointer and touch device with a region for each monitor stream, plus a separate device for each window stream, like in GNOME.
+Each region's mapping id matches the `mapping-id` stream parameter.
+
 ### Screen mirroring
 
 For presentations it can be useful to mirror an output to another.
