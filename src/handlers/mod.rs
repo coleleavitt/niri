@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::drm::DrmNode;
-use smithay::backend::input::{InputEvent, TabletToolDescriptor};
+use smithay::backend::input::{InputEvent, PointerButtonEvent as _, TabletToolDescriptor};
 use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::desktop::{PopupKind, PopupManager};
 use smithay::input::dnd::{self, DnDGrab, DndGrabHandler, DndTarget};
@@ -21,6 +21,7 @@ use smithay::input::tablet::TabletSeatHandler;
 use smithay::input::{keyboard, Seat, SeatHandler, SeatState};
 use smithay::output::Output;
 use smithay::reexports::rustix::fs::{fcntl_setfl, OFlags};
+use smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::server::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1;
 use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_pointer::WlPointer;
@@ -80,6 +81,7 @@ use crate::protocols::gamma_control::{GammaControlHandler, GammaControlManagerSt
 use crate::protocols::mutter_x11_interop::MutterX11InteropHandler;
 use crate::protocols::output_management::{OutputManagementHandler, OutputManagementManagerState};
 use crate::protocols::screencopy::{Screencopy, ScreencopyHandler, ScreencopyManagerState};
+use crate::protocols::virtual_keyboard::VirtualKeyboardHandler;
 use crate::protocols::virtual_pointer::{
     VirtualPointerAxisEvent, VirtualPointerButtonEvent, VirtualPointerHandler,
     VirtualPointerInputBackend, VirtualPointerManagerState, VirtualPointerMotionAbsoluteEvent,
@@ -786,22 +788,43 @@ impl VirtualPointerHandler for State {
         &mut self.niri.virtual_pointer_state
     }
 
+    fn virtual_pointers_blocked(&self) -> bool {
+        self.niri.virtual_input.is_blocked()
+    }
+
     fn on_virtual_pointer_motion(&mut self, event: VirtualPointerMotionEvent) {
+        self.niri.virtual_input_activity();
         self.process_input_event(InputEvent::<VirtualPointerInputBackend>::PointerMotion { event });
     }
 
     fn on_virtual_pointer_motion_absolute(&mut self, event: VirtualPointerMotionAbsoluteEvent) {
+        self.niri.virtual_input_activity();
         self.process_input_event(
             InputEvent::<VirtualPointerInputBackend>::PointerMotionAbsolute { event },
         );
     }
 
     fn on_virtual_pointer_button(&mut self, event: VirtualPointerButtonEvent) {
+        self.niri.virtual_input_activity();
+        self.niri
+            .virtual_input
+            .track_button(event.button_code(), event.state());
         self.process_input_event(InputEvent::<VirtualPointerInputBackend>::PointerButton { event });
     }
 
     fn on_virtual_pointer_axis(&mut self, event: VirtualPointerAxisEvent) {
+        self.niri.virtual_input_activity();
         self.process_input_event(InputEvent::<VirtualPointerInputBackend>::PointerAxis { event });
+    }
+}
+
+impl VirtualKeyboardHandler for State {
+    fn virtual_keyboards_blocked(&self) -> bool {
+        self.niri.virtual_input.is_blocked()
+    }
+
+    fn virtual_keyboard_created(&mut self, manager: &ZwpVirtualKeyboardManagerV1) {
+        self.niri.virtual_keyboard_created(manager);
     }
 }
 

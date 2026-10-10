@@ -53,26 +53,7 @@ impl Session {
         #[zbus(signal_context)] ctxt: SignalEmitter<'_>,
     ) -> fdo::Result<()> {
         self.ensure_open_for_peer(&hdr)?;
-        debug!(id = self.id, "RemoteDesktop session stopped");
-
-        if self.stopped.swap(true, Ordering::SeqCst) {
-            return Ok(());
-        }
-
-        if let Err(err) = self.registry.remove_session(&self.session_id) {
-            warn!("error removing RemoteDesktop session registry entry: {err:?}");
-        }
-
-        if let Err(err) = Session::closed(&ctxt).await {
-            warn!("error emitting RemoteDesktop Closed signal: {err:?}");
-        }
-
-        server
-            .remove::<Session, _>(ctxt.path())
-            .await
-            .map_err(|err| fdo::Error::Failed(format!("error removing session object: {err:?}")))?;
-
-        Ok(())
+        self.close(server, ctxt).await
     }
 
     #[zbus(signal)]
@@ -359,6 +340,29 @@ impl Session {
 }
 
 impl Session {
+    pub async fn close(&self, server: &ObjectServer, ctxt: SignalEmitter<'_>) -> fdo::Result<()> {
+        debug!(id = self.id, "RemoteDesktop session stopped");
+
+        if self.stopped.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        if let Err(err) = self.registry.remove_session(&self.session_id) {
+            warn!("error removing RemoteDesktop session registry entry: {err:?}");
+        }
+
+        if let Err(err) = Session::closed(&ctxt).await {
+            warn!("error emitting RemoteDesktop Closed signal: {err:?}");
+        }
+
+        server
+            .remove::<Session, _>(ctxt.path())
+            .await
+            .map_err(|err| fdo::Error::Failed(format!("error removing session object: {err:?}")))?;
+
+        Ok(())
+    }
+
     pub fn new(
         id: u64,
         session_id: String,

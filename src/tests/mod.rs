@@ -13,5 +13,6 @@ mod layer_shell;
 mod pointer_warp;
 mod remove_output;
 mod transactions;
+mod virtual_input;
 mod window_at;
 mod window_opening;

@@ -2358,6 +2358,12 @@ impl State {
                     watcher.load_config(path);
                 }
             }
+            Action::RevokeVirtualInput => {
+                self.revoke_virtual_input();
+            }
+            Action::ToggleVirtualInputBlocked => {
+                self.toggle_virtual_input_blocked();
+            }
             Action::MruConfirm => {
                 self.confirm_mru();
             }

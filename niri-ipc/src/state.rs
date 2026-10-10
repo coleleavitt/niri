@@ -9,7 +9,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
-use crate::{Cast, Event, KeyboardLayouts, Window, Workspace};
+use crate::{Cast, Event, KeyboardLayouts, VirtualInput, Window, Workspace};
 
 /// Part of the state communicated via the event stream.
 pub trait EventStreamStatePart {
@@ -49,6 +49,9 @@ pub struct EventStreamState {
 
     /// State of screencasts.
     pub casts: CastsState,
+
+    /// State of synthetic input.
+    pub virtual_input: VirtualInputState,
 }
 
 /// The workspaces state communicated over the event stream.
@@ -86,6 +89,13 @@ pub struct ConfigState {
     pub failed: bool,
 }
 
+/// The synthetic input state communicated over the event stream.
+#[derive(Debug, Default)]
+pub struct VirtualInputState {
+    /// Synthetic input as of the last change.
+    pub virtual_input: VirtualInput,
+}
+
 /// The casts state communicated over the event stream.
 #[derive(Debug, Default)]
 pub struct CastsState {
@@ -102,6 +112,7 @@ impl EventStreamStatePart for EventStreamState {
         events.extend(self.overview.replicate());
         events.extend(self.config.replicate());
         events.extend(self.casts.replicate());
+        events.extend(self.virtual_input.replicate());
         events
     }
 
@@ -112,6 +123,7 @@ impl EventStreamStatePart for EventStreamState {
         let event = self.overview.apply(event)?;
         let event = self.config.apply(event)?;
         let event = self.casts.apply(event)?;
+        let event = self.virtual_input.apply(event)?;
         Some(event)
     }
 }
@@ -315,6 +327,24 @@ impl EventStreamStatePart for CastsState {
             Event::CastStopped { stream_id } => {
                 let cast = self.casts.remove(&stream_id);
                 cast.expect("stopped cast was missing from the map");
+            }
+            event => return Some(event),
+        }
+        None
+    }
+}
+
+impl EventStreamStatePart for VirtualInputState {
+    fn replicate(&self) -> Vec<Event> {
+        vec![Event::VirtualInputChanged {
+            virtual_input: self.virtual_input.clone(),
+        }]
+    }
+
+    fn apply(&mut self, event: Event) -> Option<Event> {
+        match event {
+            Event::VirtualInputChanged { virtual_input } => {
+                self.virtual_input = virtual_input;
             }
             event => return Some(event),
         }
