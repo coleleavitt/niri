@@ -21,10 +21,12 @@ use smithay::input::{keyboard, Seat, SeatHandler, SeatState};
 use smithay::output::Output;
 use smithay::reexports::rustix::fs::{fcntl_setfl, OFlags};
 use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
+use smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::server::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
+use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{Logical, Point, Rectangle, Serial};
+use smithay::utils::{Logical, Point, Rectangle, Serial, Transform};
 use smithay::wayland::compositor::{get_parent, with_states};
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::drm_lease::{
@@ -33,6 +35,14 @@ use smithay::wayland::drm_lease::{
 use smithay::wayland::fractional_scale::FractionalScaleHandler;
 use smithay::wayland::idle_inhibit::IdleInhibitHandler;
 use smithay::wayland::idle_notify::{IdleNotifierHandler, IdleNotifierState};
+use smithay::wayland::image_capture_source::{
+    ImageCaptureSource, ImageCaptureSourceHandler, OutputCaptureSourceHandler,
+    OutputCaptureSourceState,
+};
+use smithay::wayland::image_copy_capture::{
+    BufferConstraints, CaptureFailureReason, Frame, FrameRef, ImageCopyCaptureHandler,
+    ImageCopyCaptureState, Session, SessionRef,
+};
 use smithay::wayland::input_method::{InputMethodHandler, PopupSurface};
 use smithay::wayland::keyboard_shortcuts_inhibit::{
     KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor,
@@ -74,6 +84,8 @@ use crate::protocols::foreign_toplevel::{
     self, ForeignToplevelHandler, ForeignToplevelManagerState,
 };
 use crate::protocols::gamma_control::{GammaControlHandler, GammaControlManagerState};
+use crate::protocols::image_capture_source::ToplevelImageCaptureSourceHandler;
+use crate::protocols::image_copy_capture::{image_capture_dmabuf_constraints, ImageCaptureTarget};
 use crate::protocols::mutter_x11_interop::MutterX11InteropHandler;
 use crate::protocols::output_management::{OutputManagementHandler, OutputManagementManagerState};
 use crate::protocols::screencopy::{Screencopy, ScreencopyHandler, ScreencopyManagerState};
@@ -729,6 +741,107 @@ impl ScreencopyHandler for State {
 
     fn screencopy_state(&mut self) -> &mut ScreencopyManagerState {
         &mut self.niri.screencopy_state
+    }
+}
+
+impl ImageCaptureSourceHandler for State {}
+
+impl OutputCaptureSourceHandler for State {
+    fn output_capture_source_state(&mut self) -> &mut OutputCaptureSourceState {
+        &mut self.niri.image_copy_capture_state.output_source
+    }
+
+    fn output_source_created(&mut self, source: ImageCaptureSource, output: &Output) {
+        if self.niri.output_exists(output) {
+            let target = ImageCaptureTarget::Output(output.downgrade());
+            source.user_data().insert_if_missing(|| target);
+        }
+    }
+}
+
+impl ToplevelImageCaptureSourceHandler for State {
+    fn toplevel_source_created(
+        &mut self,
+        source: ImageCaptureSource,
+        toplevel: &ExtForeignToplevelHandleV1,
+    ) {
+        let state = &self.niri.foreign_toplevel_state;
+        if let Some(id) = state.window_id_for_ext_handle(toplevel) {
+            source
+                .user_data()
+                .insert_if_missing(|| ImageCaptureTarget::Window(id));
+        }
+    }
+}
+
+impl ImageCopyCaptureHandler for State {
+    fn image_copy_capture_state(&mut self) -> &mut ImageCopyCaptureState {
+        &mut self.niri.image_copy_capture_state.protocol
+    }
+
+    fn capture_constraints(&mut self, source: &ImageCaptureSource) -> Option<BufferConstraints> {
+        let target = source.user_data().get::<ImageCaptureTarget>()?;
+        let size = self.niri.image_capture_buffer_params(target)?.size;
+        let dma = self
+            .backend
+            .with_primary_renderer(image_capture_dmabuf_constraints)
+            .flatten();
+        Some(BufferConstraints {
+            size: size.to_logical(1).to_buffer(1, Transform::Normal),
+            shm: vec![wl_shm::Format::Xrgb8888, wl_shm::Format::Argb8888],
+            dma,
+        })
+    }
+
+    fn new_session(&mut self, session: Session) {
+        let target = session
+            .source()
+            .user_data()
+            .get::<ImageCaptureTarget>()
+            .cloned();
+        let Some(target) = target else {
+            error!("image copy capture session for an unresolved source");
+            return;
+        };
+        self.niri
+            .image_copy_capture_state
+            .add_session(session, target);
+    }
+
+    fn frame(&mut self, session: &SessionRef, frame: Frame) {
+        let Some(s) = self.niri.image_copy_capture_state.session_mut(session) else {
+            frame.fail(CaptureFailureReason::Stopped);
+            return;
+        };
+        s.pending_frame = Some(frame);
+
+        // The first frame is captured right away; later ones wait for damage on redraw.
+        if s.has_captured {
+            let target = s.target.clone();
+            if let Some(params) = self.niri.image_capture_buffer_params(&target) {
+                self.niri.queue_redraw(&params.output);
+            }
+            return;
+        }
+
+        let rendered = self.backend.with_primary_renderer(|renderer| {
+            self.niri.render_image_copy_capture_now(renderer, session);
+        });
+        if rendered.is_none() {
+            if let Some(s) = self.niri.image_copy_capture_state.session_mut(session) {
+                if let Some(frame) = s.pending_frame.take() {
+                    frame.fail(CaptureFailureReason::Unknown);
+                }
+            }
+        }
+    }
+
+    fn frame_aborted(&mut self, frame: FrameRef) {
+        self.niri.image_copy_capture_state.remove_frame(&frame);
+    }
+
+    fn session_destroyed(&mut self, session: SessionRef) {
+        self.niri.image_copy_capture_state.remove_session(&session);
     }
 }
 

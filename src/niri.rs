@@ -83,6 +83,9 @@ use smithay::wayland::dmabuf::DmabufState;
 use smithay::wayland::fractional_scale::FractionalScaleManagerState;
 use smithay::wayland::idle_inhibit::IdleInhibitManagerState;
 use smithay::wayland::idle_notify::IdleNotifierState;
+use smithay::wayland::image_copy_capture::{
+    CaptureFailureReason, Frame as ImageCopyFrame, SessionRef,
+};
 use smithay::wayland::input_method::InputMethodManagerState;
 use smithay::wayland::keyboard_shortcuts_inhibit::{
     KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor,
@@ -149,6 +152,10 @@ use crate::niri_render_elements;
 use crate::protocols::ext_workspace::{self, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
 use crate::protocols::gamma_control::GammaControlManagerState;
+use crate::protocols::image_copy_capture::{
+    damage_to_buffer, submit_after_sync, CaptureBuffer, ImageCaptureParams, ImageCaptureTarget,
+    ImageCopyCaptureManagerState, ImageCopyCaptureSession,
+};
 use crate::protocols::mutter_x11_interop::MutterX11InteropManagerState;
 use crate::protocols::output_management::OutputManagementManagerState;
 use crate::protocols::screencopy::{Screencopy, ScreencopyBuffer, ScreencopyManagerState};
@@ -301,6 +308,7 @@ pub struct Niri {
     pub foreign_toplevel_state: ForeignToplevelManagerState,
     pub ext_workspace_state: ExtWorkspaceManagerState,
     pub screencopy_state: ScreencopyManagerState,
+    pub image_copy_capture_state: ImageCopyCaptureManagerState,
     pub output_management_state: OutputManagementManagerState,
     pub viewporter_state: ViewporterState,
     pub background_effect_state: BackgroundEffectState,
@@ -890,6 +898,7 @@ impl State {
         self.refresh_pointer_contents();
         foreign_toplevel::refresh(self);
         ext_workspace::refresh(self);
+        self.niri.refresh_image_copy_capture();
 
         #[cfg(feature = "xdp-gnome-screencast")]
         self.niri.refresh_mapped_cast_outputs();
@@ -2582,6 +2591,8 @@ impl Niri {
         output_management_state.on_config_changed(config_.outputs.clone());
         let screencopy_state =
             ScreencopyManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
+        let image_copy_capture_state =
+            ImageCopyCaptureManagerState::new::<State, _>(&display_handle, client_is_unrestricted);
         let viewporter_state = ViewporterState::new::<State>(&display_handle);
         let background_effect_state = BackgroundEffectState::new::<State>(&display_handle);
         let xdg_foreign_state = XdgForeignState::new::<State>(&display_handle);
@@ -2770,6 +2781,7 @@ impl Niri {
             ext_workspace_state,
             output_management_state,
             screencopy_state,
+            image_copy_capture_state,
             viewporter_state,
             background_effect_state,
             xdg_foreign_state,
@@ -4985,6 +4997,7 @@ impl Niri {
             }
 
             self.render_for_screencopy_with_damage(renderer, output);
+            self.render_for_image_copy_capture(renderer, output);
         });
     }
 
@@ -5868,6 +5881,40 @@ impl Niri {
         let _span = tracy_client::span!("Niri::screenshot_window");
 
         let scale = Scale::from(output.current_scale().fractional_scale());
+        let (elements, pointer_count) =
+            self.render_window_for_capture(renderer, output, mapped, show_pointer);
+
+        // The pointer is not included in encompassing_geo because we don't want it to expand the
+        // screenshot size.
+        let geo = encompassing_geo(scale, elements.iter().skip(pointer_count));
+        let elements = elements.iter().rev().map(|elem| {
+            RelocateRenderElement::from_element(elem, geo.loc.upscale(-1), Relocate::Relative)
+        });
+        let pixels = render_to_vec(
+            renderer,
+            geo.size,
+            scale,
+            Transform::Normal,
+            Fourcc::Abgr8888,
+            elements,
+        )?;
+
+        self.save_screenshot(geo.size, pixels, write_to_disk, path)
+            .context("error saving screenshot")
+    }
+
+    /// Renders a window by itself for screen capture, front to back.
+    ///
+    /// Elements are positioned relative to the window's main surface origin. Also returns how many
+    /// leading elements belong to the pointer.
+    fn render_window_for_capture(
+        &self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        mapped: &Mapped,
+        show_pointer: bool,
+    ) -> (Vec<WindowScreenshotRenderElement<GlesRenderer>>, usize) {
+        let scale = Scale::from(output.current_scale().fractional_scale());
         let alpha =
             if mapped.sizing_mode().is_fullscreen() || mapped.is_ignoring_opacity_window_rule() {
                 1.
@@ -5905,25 +5952,225 @@ impl Niri {
             &mut |elem| elements.push(elem.into()),
         );
 
-        // The pointer is not included in encompassing_geo because we don't want it to expand the
-        // screenshot size.
-        let geo = encompassing_geo(scale, elements.iter().skip(pointer_count));
-        let elements = elements.iter().rev().map(|elem| {
-            RelocateRenderElement::from_element(elem, geo.loc.upscale(-1), Relocate::Relative)
-        });
-        let pixels = render_to_vec(
-            renderer,
-            geo.size,
-            scale,
-            Transform::Normal,
-            Fourcc::Abgr8888,
-            elements,
-        )?;
-
-        self.save_screenshot(geo.size, pixels, write_to_disk, path)
-            .context("error saving screenshot")
+        (elements, pointer_count)
     }
 
+    /// Returns the output, buffer size, scale and transform for an image copy capture target, or
+    /// `None` if the target is gone.
+    pub fn image_capture_buffer_params(
+        &self,
+        target: &ImageCaptureTarget,
+    ) -> Option<ImageCaptureParams> {
+        match target {
+            ImageCaptureTarget::Output(weak) => {
+                let output = weak.upgrade().filter(|output| self.output_exists(output))?;
+                let size = output.current_mode()?.size;
+                let scale = Scale::from(output.current_scale().fractional_scale());
+                let transform = output.current_transform();
+                Some(ImageCaptureParams {
+                    output,
+                    size,
+                    scale,
+                    transform,
+                })
+            }
+            ImageCaptureTarget::Window(id) => {
+                let mut windows = self.layout.windows();
+                let (monitor, mapped) = windows.find(|(_, mapped)| mapped.id() == *id)?;
+                let output = monitor?.output().clone();
+                let scale = Scale::from(output.current_scale().fractional_scale());
+                let bbox = mapped.window.bbox_with_popups();
+                let size = bbox.to_physical_precise_up(scale).size;
+                Some(ImageCaptureParams {
+                    output,
+                    size,
+                    scale,
+                    transform: Transform::Normal,
+                })
+            }
+        }
+    }
+
+    /// Stops image copy capture sessions whose output or window is gone.
+    pub fn refresh_image_copy_capture(&mut self) {
+        let state = &self.image_copy_capture_state;
+        if state.sessions.is_empty() {
+            return;
+        }
+
+        let mut sessions = mem::take(&mut self.image_copy_capture_state.sessions);
+        sessions.retain(|s| self.image_capture_buffer_params(&s.target).is_some());
+        self.image_copy_capture_state.sessions = sessions;
+        self.image_copy_capture_state.protocol.cleanup();
+    }
+
+    /// Captures pending image copy frames whose target is on this output.
+    pub fn render_for_image_copy_capture(&mut self, renderer: &mut GlesRenderer, output: &Output) {
+        let _span = tracy_client::span!("Niri::render_for_image_copy_capture");
+
+        let mut sessions = mem::take(&mut self.image_copy_capture_state.sessions);
+        for session in &mut sessions {
+            if session.pending_frame.is_none() {
+                continue;
+            }
+
+            let Some(params) = self.image_capture_buffer_params(&session.target) else {
+                continue;
+            };
+            if params.output == *output {
+                self.capture_image_copy_frame(renderer, session, params);
+            }
+        }
+        self.image_copy_capture_state.sessions = sessions;
+    }
+
+    /// Captures the session's pending frame outside of an output redraw.
+    pub fn render_image_copy_capture_now(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        session: &SessionRef,
+    ) {
+        let _span = tracy_client::span!("Niri::render_image_copy_capture_now");
+
+        let Some(idx) =
+            (self.image_copy_capture_state.sessions.iter()).position(|s| s.session == *session)
+        else {
+            return;
+        };
+
+        let target = &self.image_copy_capture_state.sessions[idx].target;
+        let Some(params) = self.image_capture_buffer_params(target) else {
+            return;
+        };
+        if matches!(target, ImageCaptureTarget::Output(_)) {
+            self.update_render_elements(Some(&params.output));
+        }
+
+        let mut sessions = mem::take(&mut self.image_copy_capture_state.sessions);
+        self.capture_image_copy_frame(renderer, &mut sessions[idx], params);
+        self.image_copy_capture_state.sessions = sessions;
+    }
+
+    fn capture_image_copy_frame(
+        &self,
+        renderer: &mut GlesRenderer,
+        session: &mut ImageCopyCaptureSession,
+        params: ImageCaptureParams,
+    ) {
+        let Some(frame) = session.pending_frame.take() else {
+            return;
+        };
+        let Some(mut constraints) = session.session.current_constraints() else {
+            frame.fail(CaptureFailureReason::Stopped);
+            return;
+        };
+
+        let buffer_size = params.size.to_logical(1).to_buffer(1, Transform::Normal);
+        if constraints.size != buffer_size {
+            constraints.size = buffer_size;
+            session.session.update_constraints(constraints);
+            frame.fail(CaptureFailureReason::BufferConstraints);
+            return;
+        }
+
+        let Some(buffer) = CaptureBuffer::new(frame.buffer(), params.size) else {
+            frame.fail(CaptureFailureReason::BufferConstraints);
+            return;
+        };
+
+        let draw_cursor = session.session.draw_cursor();
+        match &session.target {
+            ImageCaptureTarget::Output(_) => {
+                let ctx = RenderCtx {
+                    renderer: &mut *renderer,
+                    target: RenderTarget::ScreenCapture,
+                    xray: None,
+                };
+                let elements = self.render_to_vec(ctx, &params.output, draw_cursor);
+                self.finish_image_copy_frame(renderer, session, frame, buffer, &elements, &params);
+            }
+            ImageCaptureTarget::Window(id) => {
+                let mut windows = self.layout.windows();
+                let Some((_, mapped)) = windows.find(|(_, mapped)| mapped.id() == *id) else {
+                    frame.fail(CaptureFailureReason::Unknown);
+                    return;
+                };
+
+                let bbox = mapped.window.bbox_with_popups();
+                let offset = bbox.to_physical_precise_up(params.scale).loc.upscale(-1);
+                let (elements, _) =
+                    self.render_window_for_capture(renderer, &params.output, mapped, draw_cursor);
+                let elements: Vec<_> = elements
+                    .into_iter()
+                    .map(|elem| {
+                        RelocateRenderElement::from_element(elem, offset, Relocate::Relative)
+                    })
+                    .collect();
+                self.finish_image_copy_frame(renderer, session, frame, buffer, &elements, &params);
+            }
+        }
+    }
+
+    fn finish_image_copy_frame(
+        &self,
+        renderer: &mut GlesRenderer,
+        session: &mut ImageCopyCaptureSession,
+        frame: ImageCopyFrame,
+        buffer: CaptureBuffer,
+        elements: &[impl RenderElement<GlesRenderer>],
+        params: &ImageCaptureParams,
+    ) {
+        let ImageCaptureParams {
+            size,
+            scale,
+            transform,
+            ..
+        } = *params;
+
+        let tracker = &mut session.damage_tracker;
+        let OutputModeSource::Static {
+            size: last_size,
+            scale: last_scale,
+            transform: last_transform,
+        } = tracker.mode().clone()
+        else {
+            unreachable!("damage tracker must have static mode");
+        };
+        if size != last_size || scale != last_scale || transform != last_transform {
+            *tracker = OutputDamageTracker::new(size, scale, transform);
+        }
+
+        // Just checked damage tracker has static mode.
+        let (damage, states) = tracker.damage_output(1, elements).unwrap();
+        let Some(damage) = damage.map(|damage| damage_to_buffer(damage, size, transform)) else {
+            trace!("no damage for image copy capture, waiting till next redraw");
+            session.pending_frame = Some(frame);
+            return;
+        };
+
+        let res = match &buffer {
+            CaptureBuffer::Shm(wl_buffer) => {
+                render_to_shm(renderer, tracker, wl_buffer, elements, states).map(|()| None)
+            }
+            CaptureBuffer::Dmabuf(dmabuf) => {
+                render_to_dmabuf(renderer, tracker, dmabuf.clone(), elements, states).map(Some)
+            }
+        };
+
+        match res {
+            Ok(sync) => {
+                session.has_captured = true;
+                let presented = get_monotonic_time();
+                submit_after_sync(frame, transform, damage, presented, sync, &self.event_loop);
+            }
+            Err(err) => {
+                warn!("error rendering for image copy capture: {err:?}");
+                // Recreate damage tracker to report full damage next time.
+                *tracker = OutputDamageTracker::new((0, 0), 1., Transform::Normal);
+                frame.fail(CaptureFailureReason::Unknown);
+            }
+        }
+    }
     pub fn save_screenshot(
         &self,
         size: Size<i32, Physical>,
