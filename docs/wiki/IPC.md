@@ -28,6 +28,23 @@ You can get raw events from `niri msg --json event-stream`, or by connecting to 
 
 You can find the full list of events along with documentation [here](https://niri-wm.github.io/niri/niri_ipc/enum.Event.html).
 
+### Synthetic Input
+
+<sup>Since: next release</sup>
+
+`niri msg virtual-input-state` shows whether synthetic input (virtual pointers, virtual keyboards, RemoteDesktop sessions) is driving the session:
+
+```sh
+$ niri msg --json virtual-input-state
+{"active":true,"blocked":false,"virtual_pointers":1,"virtual_keyboard_clients":0,"remote_desktop_sessions":0,"last_activity":{"secs":81234,"nanos":5000000}}
+```
+
+`active` turns `false` after the [`virtual-input-indicator`](./Configuration:-Miscellaneous.md#virtual-input-indicator) `idle-timeout-ms`.
+`last_activity` comes from the monotonic clock.
+The event stream sends `VirtualInputChanged` when synthetic input becomes active or idle, is blocked or unblocked, or when the counts change; it is not sent for every event.
+
+Use `niri msg action revoke-virtual-input` and `niri msg action toggle-virtual-input-blocked` to take over; see [the key bindings page](./Configuration:-Key-Bindings.md#revoke-virtual-input-toggle-virtual-input-blocked).
+
 ### Programmatic Access
 
 `niri msg --json` is a thin wrapper over writing and reading to a socket.
