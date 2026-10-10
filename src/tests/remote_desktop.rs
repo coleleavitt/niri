@@ -1,4 +1,4 @@
-use niri_config::Config;
+use niri_config::{Action, Config};
 use smithay::utils::Point;
 
 use super::*;
@@ -89,4 +89,22 @@ fn window_stream_pointer_motion_is_dropped_when_the_window_cannot_be_targeted() 
     f.niri().layout.open_overview();
     move_pointer(&mut f, id, 50., 50.);
     assert_eq!(pointer_location(&mut f), before);
+}
+
+#[test]
+fn window_stream_pointer_motion_is_dropped_while_virtual_input_is_blocked() {
+    let (mut f, id) = set_up();
+
+    move_pointer(&mut f, id, 10., 10.);
+    let before = pointer_location(&mut f);
+
+    f.niri_state()
+        .do_action(Action::ToggleVirtualInputBlocked, false);
+    move_pointer(&mut f, id, 50., 50.);
+    assert_eq!(pointer_location(&mut f), before);
+
+    f.niri_state()
+        .do_action(Action::ToggleVirtualInputBlocked, false);
+    move_pointer(&mut f, id, 50., 50.);
+    assert_ne!(pointer_location(&mut f), before);
 }

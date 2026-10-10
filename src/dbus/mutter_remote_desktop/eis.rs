@@ -118,6 +118,11 @@ impl RemoteDesktopEisState {
         connection: &mut Connection,
         state: &mut State,
     ) -> PostAction {
+        // The session was stopped, possibly by revoking virtual input.
+        if !self.registry.contains_session(&self.session_id) {
+            return PostAction::Remove;
+        }
+
         let action = match event {
             Ok(EisRequestSourceEvent::Connected) => {
                 self.handle_connected(connection, state);

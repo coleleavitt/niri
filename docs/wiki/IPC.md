@@ -47,6 +47,41 @@ $ niri msg --json window-geometry --id 12
 
 The geometry is computed on request rather than sent through the event stream, since it changes on every animation frame.
 
+### Hit Testing
+
+<sup>Since: next release</sup>
+
+`niri msg window-at X Y` reports what a pointer click at a point would hit.
+The point is in the global logical coordinate space, the same one as the logical positions in `niri msg outputs`.
+The answer uses the same hit testing as real pointer input, so layer-shell surfaces on top, pop-ups, and the overview are taken into account.
+
+```sh
+$ niri msg --json window-at 120 80
+{"output":"DP-1","window_id":12,"window_local":[104.0,64.0],"is_input":true,"layer":null}
+```
+
+- `window_id` is the topmost window under the point.
+- `window_local` is the point relative to the top-left corner of the window geometry. It is only set when `is_input` is `true`.
+- `is_input` is `false` when a click there would only activate the window, for example on its border or when the overview is open.
+- `layer` is set when a layer-shell surface, such as a bar or a notification, is on top at that point.
+
+### Synthetic Input
+
+<sup>Since: next release</sup>
+
+`niri msg virtual-input-state` shows whether synthetic input (virtual pointers, virtual keyboards, RemoteDesktop sessions) is driving the session:
+
+```sh
+$ niri msg --json virtual-input-state
+{"active":true,"blocked":false,"virtual_pointers":1,"virtual_keyboard_clients":0,"remote_desktop_sessions":0,"last_activity":{"secs":81234,"nanos":5000000}}
+```
+
+`active` turns `false` after the [`virtual-input-indicator`](./Configuration:-Miscellaneous.md#virtual-input-indicator) `idle-timeout-ms`.
+`last_activity` comes from the monotonic clock.
+The event stream sends `VirtualInputChanged` when synthetic input becomes active or idle, is blocked or unblocked, or when the counts change; it is not sent for every event.
+
+Use `niri msg action revoke-virtual-input` and `niri msg action toggle-virtual-input-blocked` to take over; see [the key bindings page](./Configuration:-Key-Bindings.md#revoke-virtual-input-toggle-virtual-input-blocked).
+
 ### Programmatic Access
 
 `niri msg --json` is a thin wrapper over writing and reading to a socket.
@@ -77,6 +112,30 @@ $ env NIRI_SOCKET=./temp.sock niri msg action focus-workspace 2
 ```
 
 You can find all available requests and response types in the [niri-ipc sub-crate documentation](https://niri-wm.github.io/niri/niri_ipc/).
+
+### Capturing a Window
+
+<sup>Since: next release</sup>
+
+`niri msg capture-window --path /abs/path.png` renders one window alone and writes it to a PNG file.
+It works for tiled, scrolled-out-of-view, and covered windows, and does not touch the clipboard.
+The command returns only after the file has been fully written.
+
+- `--id N` captures the window with that id instead of the focused window.
+- `--show-pointer` includes the pointer if it is over the window.
+- A relative `--path` is resolved against the working directory of `niri msg`. A raw `CaptureWindow` request over the socket needs an absolute path.
+
+The JSON reply describes the image:
+
+```sh
+$ niri msg --json capture-window --path /tmp/window.png
+{"id":12,"path":"/tmp/window.png","width_px":1210,"height_px":820,"scale":1.25,"window_offset_px":[5,10],"window_size_px":[1200,800]}
+```
+
+Sizes are in physical pixels at the output's `scale`.
+Popups and client-side decorations can make the image larger than the window, so `window_offset_px` and `window_size_px` give the window geometry inside the image.
+
+The `screenshot`, `screenshot-screen` and `screenshot-window` actions also take `--copy-to-clipboard=false` to keep the screenshot out of the clipboard.
 
 ### Backwards Compatibility
 

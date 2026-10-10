@@ -1,6 +1,7 @@
 use std::io::ErrorKind;
 use std::iter::Peekable;
 use std::path::Path;
+use std::time::Duration;
 use std::{env, slice};
 
 use anyhow::{anyhow, bail, Context};
@@ -8,13 +9,13 @@ use niri_config::OutputName;
 use niri_ipc::socket::Socket;
 use niri_ipc::{
     Action, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, LogicalRect, Mode,
-    Output, OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowGeometry,
-    WindowLayout,
+    Output, OutputConfigChanged, Overview, PointHit, Request, Response, Transform, VirtualInput,
+    Window, WindowCapture, WindowGeometry, WindowLayout,
 };
 use serde_json::json;
 
 use crate::cli::Msg;
-use crate::utils::version;
+use crate::utils::{get_monotonic_time, version};
 
 pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
     // For actions taking paths, prepend the niri CLI's working directory.
@@ -28,6 +29,9 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         if let Some(path) = path {
             ensure_absolute_path(path).context("error making the path absolute")?;
         }
+    }
+    if let Msg::CaptureWindow { path, .. } = &mut msg {
+        ensure_absolute_path(path).context("error making the path absolute")?;
     }
 
     let wait_for_screenshot = matches!(
@@ -61,6 +65,17 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         Msg::OverviewState => Request::OverviewState,
         Msg::Casts => Request::Casts,
         Msg::WindowGeometry { id } => Request::WindowGeometry { id: *id },
+        Msg::WindowAt { x, y } => Request::WindowAt { x: *x, y: *y },
+        Msg::CaptureWindow {
+            path,
+            id,
+            show_pointer,
+        } => Request::CaptureWindow {
+            id: *id,
+            path: path.clone(),
+            show_pointer: *show_pointer,
+        },
+        Msg::VirtualInputState => Request::VirtualInputState,
     };
 
     let mut socket = Socket::connect().context("error connecting to the niri socket")?;
@@ -523,6 +538,9 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                     Event::CastStopped { stream_id } => {
                         println!("Cast stopped: stream id {stream_id}");
                     }
+                    Event::VirtualInputChanged { virtual_input } => {
+                        println!("Virtual input changed: {virtual_input:?}");
+                    }
                 }
             }
         }
@@ -580,6 +598,59 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
             }
 
             print_window_geometry(&geometry);
+        }
+        Msg::WindowAt { .. } => {
+            let Response::WindowAt(hit) = response else {
+                bail!("unexpected response: expected WindowAt, got {response:?}");
+            };
+
+            if json {
+                let hit = serde_json::to_string(&hit).context("error formatting response")?;
+                println!("{hit}");
+                return Ok(());
+            }
+
+            print_point_hit(&hit);
+        }
+        Msg::CaptureWindow { .. } => {
+            let Response::WindowCaptured(capture) = response else {
+                bail!("unexpected response: expected WindowCaptured, got {response:?}");
+            };
+
+            if json {
+                let capture =
+                    serde_json::to_string(&capture).context("error formatting response")?;
+                println!("{capture}");
+                return Ok(());
+            }
+
+            let WindowCapture {
+                id,
+                path,
+                width_px,
+                height_px,
+                scale,
+                window_offset_px: (x, y),
+                window_size_px: (w, h),
+            } = capture;
+            println!("Captured window {id} to {path}");
+            println!("  Image size: {width_px} × {height_px} px");
+            println!("  Scale: {}", fmt_rounded(scale));
+            println!("  Window geometry in image: {w} × {h} px at ({x}, {y})");
+        }
+        Msg::VirtualInputState => {
+            let Response::VirtualInputState(response) = response else {
+                bail!("unexpected response: expected VirtualInputState, got {response:?}");
+            };
+
+            if json {
+                let response =
+                    serde_json::to_string(&response).context("error formatting response")?;
+                println!("{response}");
+                return Ok(());
+            }
+
+            print_virtual_input(&response);
         }
     }
 
@@ -904,6 +975,68 @@ fn print_window_geometry(geometry: &WindowGeometry) {
     println!("    Visible part of window: {}", fmt_rect(visible_rect));
 }
 
+fn print_point_hit(hit: &PointHit) {
+    let Some(output) = &hit.output else {
+        println!("No output at this point.");
+        return;
+    };
+    println!("Output: \"{output}\"");
+
+    if let Some(layer) = &hit.layer {
+        println!(
+            "Layer surface: \"{}\" on the {:?} layer",
+            layer.namespace, layer.layer
+        );
+    }
+
+    if let Some(id) = hit.window_id {
+        let input = if hit.is_input { "" } else { " (activate only)" };
+        println!("Window ID: {id}{input}");
+    }
+
+    if let Some((x, y)) = hit.window_local {
+        println!(
+            "Window-local position: {}, {}",
+            fmt_rounded(x),
+            fmt_rounded(y)
+        );
+    }
+
+    if hit.window_id.is_none() && hit.layer.is_none() {
+        println!("Nothing under this point.");
+    }
+}
+
+fn print_virtual_input(virtual_input: &VirtualInput) {
+    let state = if virtual_input.active {
+        "active"
+    } else {
+        "idle"
+    };
+    let blocked = if virtual_input.blocked {
+        ", new synthetic input is blocked"
+    } else {
+        ""
+    };
+    println!("Virtual input is {state}{blocked}.");
+    println!("  Virtual pointers: {}", virtual_input.virtual_pointers);
+    println!(
+        "  Virtual keyboard clients: {}",
+        virtual_input.virtual_keyboard_clients
+    );
+    println!(
+        "  RemoteDesktop sessions: {}",
+        virtual_input.remote_desktop_sessions
+    );
+
+    if let Some(last) = virtual_input.last_activity {
+        let ago = get_monotonic_time().saturating_sub(Duration::from(last));
+        println!("  Last activity: {:.1} s ago", ago.as_secs_f64());
+    } else {
+        println!("  Last activity: never");
+    }
+}
+
 fn fmt_rounded(x: f64) -> String {
     let r = x.round();
     if (r - x).abs() <= 0.005 {
@@ -947,17 +1080,20 @@ mod tests {
     fn screenshot_actions_wait_for_capture() {
         assert!(action_waits_for_screenshot(&Action::Screenshot {
             show_pointer: true,
+            copy_to_clipboard: true,
             path: None,
         }));
         assert!(action_waits_for_screenshot(&Action::ScreenshotScreen {
             write_to_disk: true,
             show_pointer: true,
+            copy_to_clipboard: true,
             path: None,
         }));
         assert!(action_waits_for_screenshot(&Action::ScreenshotWindow {
             id: None,
             write_to_disk: true,
             show_pointer: false,
+            copy_to_clipboard: false,
             path: None,
         }));
         assert!(!action_waits_for_screenshot(&Action::ToggleOverview {}));

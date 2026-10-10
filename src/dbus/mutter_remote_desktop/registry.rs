@@ -62,6 +62,7 @@ pub struct RemoteDesktopWindowRegion {
 
 #[derive(Debug, Default)]
 pub(super) struct RemoteDesktopSession {
+    pub(super) path: String,
     pub(super) started: bool,
     pub(super) screen_cast_session: Option<CastSessionId>,
     pub(super) streams: HashMap<String, RemoteDesktopStream>,
@@ -79,7 +80,7 @@ impl Default for RemoteDesktopSessionRegistry {
 }
 
 impl RemoteDesktopSessionRegistry {
-    pub fn insert_session(&self, session_id: String) -> fdo::Result<()> {
+    pub fn insert_session(&self, session_id: String, path: String) -> fdo::Result<()> {
         self.with_sessions(|sessions| {
             if sessions.contains_key(&session_id) {
                 return Err(fdo::Error::Failed(format!(
@@ -87,9 +88,28 @@ impl RemoteDesktopSessionRegistry {
                 )));
             }
 
-            sessions.insert(session_id, RemoteDesktopSession::default());
+            let session = RemoteDesktopSession {
+                path,
+                ..Default::default()
+            };
+            sessions.insert(session_id, session);
             Ok(())
         })
+    }
+
+    pub fn contains_session(&self, session_id: &str) -> bool {
+        self.with_sessions(|sessions| Ok(sessions.contains_key(session_id)))
+            .unwrap_or(false)
+    }
+
+    pub fn session_count(&self) -> usize {
+        self.with_sessions(|sessions| Ok(sessions.len()))
+            .unwrap_or(0)
+    }
+
+    pub fn session_paths(&self) -> Vec<String> {
+        self.with_sessions(|sessions| Ok(sessions.values().map(|s| s.path.clone()).collect()))
+            .unwrap_or_default()
     }
 
     pub fn remove_session(&self, session_id: &str) -> fdo::Result<()> {
@@ -322,7 +342,9 @@ mod tests {
         let registry = RemoteDesktopSessionRegistry::default();
         let session_id = "started-session".to_owned();
 
-        registry.insert_session(session_id.clone()).unwrap();
+        registry
+            .insert_session(session_id.clone(), String::new())
+            .unwrap();
         registry.mark_started(&session_id).unwrap();
         let err = registry
             .associate_screen_cast(&session_id, CastSessionId::next())
@@ -338,7 +360,9 @@ mod tests {
         let screen_cast_session = CastSessionId::next();
         let stream_id = CastStreamId::next();
 
-        registry.insert_session(session_id.clone()).unwrap();
+        registry
+            .insert_session(session_id.clone(), String::new())
+            .unwrap();
         registry
             .associate_screen_cast(&session_id, screen_cast_session)
             .unwrap();
@@ -380,7 +404,9 @@ mod tests {
         let screen_cast_session = CastSessionId::next();
         let stream_id = CastStreamId::next();
 
-        registry.insert_session(session_id.clone()).unwrap();
+        registry
+            .insert_session(session_id.clone(), String::new())
+            .unwrap();
         registry
             .associate_screen_cast(&session_id, screen_cast_session)
             .unwrap();
@@ -425,7 +451,9 @@ mod tests {
         let window_stream_id = CastStreamId::next();
         let window_path = "/org/gnome/Mutter/ScreenCast/Stream/u1000";
 
-        registry.insert_session(session_id.clone()).unwrap();
+        registry
+            .insert_session(session_id.clone(), String::new())
+            .unwrap();
         registry
             .associate_screen_cast(&session_id, screen_cast_session)
             .unwrap();
@@ -482,7 +510,9 @@ mod tests {
         let screen_cast_session = CastSessionId::next();
         let window_path = "/org/gnome/Mutter/ScreenCast/Stream/u1001";
 
-        registry.insert_session(session_id.clone()).unwrap();
+        registry
+            .insert_session(session_id.clone(), String::new())
+            .unwrap();
         registry
             .associate_screen_cast(&session_id, screen_cast_session)
             .unwrap();

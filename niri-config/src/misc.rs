@@ -84,6 +84,51 @@ impl MergeWith<HotkeyOverlayPart> for HotkeyOverlay {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VirtualInputIndicator {
+    pub off: bool,
+    pub width: f64,
+    pub color: Color,
+    pub idle_timeout_ms: u32,
+}
+
+impl Default for VirtualInputIndicator {
+    fn default() -> Self {
+        Self {
+            off: false,
+            width: 4.,
+            color: Color::from_array_unpremul([1., 0.5, 0., 1.]),
+            idle_timeout_ms: 2000,
+        }
+    }
+}
+
+#[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq)]
+pub struct VirtualInputIndicatorPart {
+    #[knuffel(child)]
+    pub off: bool,
+    #[knuffel(child)]
+    pub on: bool,
+    #[knuffel(child, unwrap(argument))]
+    pub width: Option<FloatOrInt<0, 65535>>,
+    #[knuffel(child)]
+    pub color: Option<Color>,
+    #[knuffel(child, unwrap(argument))]
+    pub idle_timeout_ms: Option<u32>,
+}
+
+impl MergeWith<VirtualInputIndicatorPart> for VirtualInputIndicator {
+    fn merge_with(&mut self, part: &VirtualInputIndicatorPart) {
+        self.off |= part.off;
+        if part.on {
+            self.off = false;
+        }
+
+        merge!((self, part), width);
+        merge_clone!((self, part), color, idle_timeout_ms);
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ConfigNotification {
     pub disable_failed: bool,

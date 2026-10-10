@@ -27,7 +27,7 @@ use smithay::input::pointer::{
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
 use smithay::reexports::rustix::fs::unlink;
-use smithay::utils::SERIAL_COUNTER;
+use smithay::utils::{Point, SERIAL_COUNTER};
 use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer};
 
 use crate::backend::IpcOutputMap;
@@ -471,6 +471,43 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             let geometry = geometry.ok_or_else(|| format!("window with id {id} not found"))?;
             Response::WindowGeometry(geometry)
         }
+        Request::WindowAt { x, y } => {
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                let hit = state.niri.window_at(Point::from((x, y)));
+                let _ = tx.send_blocking(hit);
+            });
+            let result = rx.recv().await;
+            let hit = result.map_err(|_| String::from("error hit testing"))?;
+            Response::WindowAt(hit)
+        }
+        Request::CaptureWindow {
+            id,
+            path,
+            show_pointer,
+        } => {
+            validate_path(&path)?;
+
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                if let Err(err) = state.capture_window(id, path, show_pointer, tx.clone()) {
+                    let _ = tx.send_blocking(Err(err));
+                }
+            });
+            let result = rx.recv().await;
+            let capture = result.map_err(|_| String::from("error capturing window"))??;
+            Response::WindowCaptured(capture)
+        }
+        Request::VirtualInputState => {
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                let _ = tx.send_blocking(state.niri.virtual_input_state());
+            });
+            let result = rx.recv().await;
+            let virtual_input =
+                result.map_err(|_| String::from("error getting virtual input state"))?;
+            Response::VirtualInputState(virtual_input)
+        }
     };
 
     Ok(response)
@@ -483,11 +520,7 @@ fn validate_action(action: &Action) -> Result<(), String> {
     | Action::LoadConfigFile { path } = action
     {
         if let Some(path) = path {
-            // Relative paths are resolved against the niri compositor's working directory, which
-            // is almost certainly not what you want.
-            if !Path::new(path).is_absolute() {
-                return Err(format!("path must be absolute: {path}"));
-            }
+            validate_path(path)?;
         }
     }
 
@@ -498,6 +531,15 @@ fn validate_action(action: &Action) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_path(path: &str) -> Result<(), String> {
+    // Relative paths are resolved against the niri compositor's working directory, which is
+    // almost certainly not what you want.
+    if !Path::new(path).is_absolute() {
+        return Err(format!("path must be absolute: {path}"));
+    }
     Ok(())
 }
 
@@ -822,6 +864,29 @@ impl State {
         server.send_event(event);
     }
 
+    pub fn ipc_refresh_virtual_input(&mut self) {
+        let Some(server) = &self.niri.ipc_server else {
+            return;
+        };
+
+        let mut state = server.event_stream_state.borrow_mut();
+        let state = &mut state.virtual_input;
+        let virtual_input = self.niri.virtual_input_state();
+
+        // Activity alone only updates last_activity; only send events for actual changes.
+        let unchanged = niri_ipc::VirtualInput {
+            last_activity: state.virtual_input.last_activity,
+            ..virtual_input.clone()
+        };
+        if state.virtual_input == unchanged {
+            return;
+        }
+
+        let event = Event::VirtualInputChanged { virtual_input };
+        state.apply(event.clone());
+        server.send_event(event);
+    }
+
     pub fn ipc_refresh_casts(&mut self) {
         let Some(server) = &self.niri.ipc_server else {
             return;
@@ -971,6 +1036,15 @@ mod tests {
         assert_eq!(
             event_stream_buffer_size(initial_events_len),
             initial_events_len
+        );
+    }
+
+    #[test]
+    fn capture_window_requires_absolute_path() {
+        assert!(validate_path("/tmp/window.png").is_ok());
+        assert_eq!(
+            validate_path("window.png"),
+            Err(String::from("path must be absolute: window.png"))
         );
     }
 

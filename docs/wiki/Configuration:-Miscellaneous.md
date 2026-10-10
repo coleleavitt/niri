@@ -84,6 +84,13 @@ config-notification {
     disable-failed
 }
 
+virtual-input-indicator {
+    // off
+    width 4
+    color "#ff8000"
+    idle-timeout-ms 2000
+}
+
 blur {
     // off
     passes 3
@@ -454,6 +461,33 @@ config-notification {
     disable-failed
 }
 ```
+
+### `virtual-input-indicator`
+
+<sup>Since: next release</sup>
+
+A frame drawn around every monitor while synthetic input is driving the session.
+
+Synthetic input comes from programs that use the wlr-virtual-pointer or virtual-keyboard protocols (for example `wtype`, `ydotool`-style tools, or computer-use agents), and from RemoteDesktop sessions through xdg-desktop-portal (including libei).
+The frame appears when such input produces an event, and goes away after `idle-timeout-ms` without new events.
+Niri cannot see the individual events of virtual keyboards, so for them, creating a keyboard counts as an event.
+
+The frame is not drawn on screencasts or screenshots.
+
+```kdl
+// These are the default values:
+virtual-input-indicator {
+    // off
+    width 4
+    color "#ff8000"
+    idle-timeout-ms 2000
+}
+```
+
+Set `off` to hide the frame.
+`idle-timeout-ms` also controls when [`niri msg virtual-input-state`](./IPC.md) reports synthetic input as idle.
+
+To take over from synthetic input, see the [`revoke-virtual-input` and `toggle-virtual-input-blocked`](./Configuration:-Key-Bindings.md#revoke-virtual-input-toggle-virtual-input-blocked) actions.
 
 ### `blur`
 
