@@ -5991,7 +5991,8 @@ impl Niri {
         }
     }
 
-    /// Stops image copy capture sessions whose output or window is gone.
+    /// Stops image copy capture sessions whose output or window is gone, and sends new buffer
+    /// constraints when the size changes.
     pub fn refresh_image_copy_capture(&mut self) {
         let state = &self.image_copy_capture_state;
         if state.sessions.is_empty() {
@@ -5999,7 +6000,20 @@ impl Niri {
         }
 
         let mut sessions = mem::take(&mut self.image_copy_capture_state.sessions);
-        sessions.retain(|s| self.image_capture_buffer_params(&s.target).is_some());
+        sessions.retain(|s| {
+            let Some(params) = self.image_capture_buffer_params(&s.target) else {
+                return false;
+            };
+
+            let size = params.size.to_logical(1).to_buffer(1, Transform::Normal);
+            if let Some(mut constraints) = s.session.current_constraints() {
+                if constraints.size != size {
+                    constraints.size = size;
+                    s.session.update_constraints(constraints);
+                }
+            }
+            true
+        });
         self.image_copy_capture_state.sessions = sessions;
         self.image_copy_capture_state.protocol.cleanup();
     }
