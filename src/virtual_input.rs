@@ -289,6 +289,17 @@ impl State {
             pointer.frame(self);
         }
 
+        // Smithay sends virtual keyboard keys straight to the focused client, so niri doesn't
+        // know which keys are held. Leaving the focused surface tells the client that all keys
+        // and modifiers are released; entering it again restores the seat's real state.
+        if !self.niri.virtual_input.keyboard_managers.is_empty() {
+            let keyboard = self.niri.seat.get_keyboard().unwrap();
+            if let Some(focus) = keyboard.current_focus() {
+                keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+                keyboard.set_focus(self, Some(focus), SERIAL_COUNTER.next_serial());
+            }
+        }
+
         #[cfg(feature = "xdp-gnome-screencast")]
         {
             let tracker = &mut self.niri.virtual_input;
