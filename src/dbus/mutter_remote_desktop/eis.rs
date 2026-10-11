@@ -1,6 +1,8 @@
+use std::cell::RefCell;
 use std::os::unix::net::UnixStream;
+use std::rc::Rc;
 
-use calloop::PostAction;
+use calloop::{PostAction, RegistrationToken};
 use reis::calloop::{EisRequestSource, EisRequestSourceEvent};
 use reis::eis::device::DeviceType;
 use reis::enumflags2::BitFlags;
@@ -47,15 +49,25 @@ enum EisRegionTarget {
     Window(u64),
 }
 
-#[derive(Default)]
+/// Standalone absolute device for one window stream, like in Mutter.
+struct WindowDevice {
+    device: Device,
+    region: EisRegion,
+    name: &'static str,
+    capabilities: BitFlags<DeviceCapability>,
+}
+
 struct RemoteDesktopEisState {
     session_id: String,
     registry: RemoteDesktopSessionRegistry,
     device_types: RemoteDesktopDeviceTypes,
+    connection: Option<Connection>,
+    /// Source that re-advertises window regions when a window stream resizes.
+    window_region_refresh: Option<RegistrationToken>,
     regions: Vec<EisRegion>,
     window_regions: Vec<EisRegion>,
-    /// Standalone absolute devices, one per window stream and capability, like Mutter.
-    window_devices: Vec<(Device, EisRegion)>,
+    /// One device per window stream and capability set.
+    window_devices: Vec<WindowDevice>,
     seat: Option<reis::request::Seat>,
     keyboard: Option<Device>,
     pointer: Option<Device>,
@@ -86,10 +98,16 @@ pub fn connect_to_niri(
     let context = reis::eis::Context::new(connection.socket)
         .map_err(|err| format!("failed to create EIS context: {err:?}"))?;
     let source = EisRequestSource::new(context, 1);
-    let mut eis_state = RemoteDesktopEisState {
+    let (ping, ping_source) = calloop::ping::make_ping()
+        .map_err(|err| format!("failed to create EIS window region ping: {err:?}"))?;
+    let registry = connection.registry.clone();
+    let session_id = connection.session_id.clone();
+    let eis_state = Rc::new(RefCell::new(RemoteDesktopEisState {
         session_id: connection.session_id,
         registry: connection.registry,
         device_types: connection.device_types,
+        connection: None,
+        window_region_refresh: None,
         regions: Vec::new(),
         window_regions: Vec::new(),
         window_devices: Vec::new(),
@@ -98,21 +116,51 @@ pub fn connect_to_niri(
         pointer: None,
         pointer_absolute: None,
         touch: None,
-    };
+    }));
+
+    // The ping source removes itself once the session and its pings are gone.
+    let refresh_state = eis_state.clone();
+    let refresh = state
+        .niri
+        .event_loop
+        .insert_source(ping_source, move |(), &mut (), state| {
+            refresh_state.borrow_mut().refresh_window_regions(state);
+        })
+        .map_err(|err| format!("failed to insert EIS window region ping: {err:?}"))?;
+    eis_state.borrow_mut().window_region_refresh = Some(refresh);
 
     state
         .niri
         .event_loop
         .insert_source(source, move |event, connection, state| {
-            Ok(eis_state.handle_source_event(event, connection, state))
+            Ok(eis_state
+                .borrow_mut()
+                .handle_source_event(event, connection, state))
         })
         .map_err(|err| format!("failed to insert EIS source: {err:?}"))?;
 
-    Ok(())
+    registry
+        .add_eis_window_region_ping(&session_id, ping)
+        .map_err(|err| format!("{err:?}"))
 }
 
 impl RemoteDesktopEisState {
     fn handle_source_event(
+        &mut self,
+        event: Result<EisRequestSourceEvent, reis::Error>,
+        connection: &mut Connection,
+        state: &mut State,
+    ) -> PostAction {
+        let action = self.handle_event(event, connection, state);
+        if action == PostAction::Remove {
+            if let Some(token) = self.window_region_refresh.take() {
+                state.niri.event_loop.remove(token);
+            }
+        }
+        action
+    }
+
+    fn handle_event(
         &mut self,
         event: Result<EisRequestSourceEvent, reis::Error>,
         connection: &mut Connection,
@@ -145,7 +193,57 @@ impl RemoteDesktopEisState {
         action
     }
 
+    /// Re-advertises the regions of window streams whose size changed.
+    ///
+    /// libei regions cannot change once a device is added, so this replaces the devices of the
+    /// changed regions, like Mutter does when its viewports change.
+    fn refresh_window_regions(&mut self, state: &State) {
+        let Some(connection) = self.connection.clone() else {
+            return;
+        };
+        let regions = match self.registry.window_regions(&self.session_id) {
+            Ok(regions) => window_regions(state, &regions),
+            Err(err) => {
+                warn!("error resolving remote desktop EIS window regions: {err:?}");
+                return;
+            }
+        };
+        if regions == self.window_regions {
+            return;
+        }
+        self.window_regions = regions;
+
+        let (current, stale) = std::mem::take(&mut self.window_devices)
+            .into_iter()
+            .partition(|device| self.window_regions.contains(&device.region));
+        self.window_devices = current;
+        for stale in stale {
+            stale.device.remove();
+            let region = self
+                .window_regions
+                .iter()
+                .find(|region| region.mapping_id == stale.region.mapping_id);
+            let Some(region) = region.cloned() else {
+                continue;
+            };
+            let seat = stale.device.seat().clone();
+            self.add_window_device(
+                &connection,
+                state,
+                &seat,
+                stale.name,
+                stale.capabilities,
+                region,
+            );
+        }
+
+        if let Err(err) = connection.flush() {
+            warn!("error flushing remote desktop EIS connection: {err:?}");
+        }
+    }
+
     fn handle_connected(&mut self, connection: &Connection, state: &State) {
+        self.connection = Some(connection.clone());
         self.regions = match output_regions(&self.registry, &self.session_id) {
             Ok(regions) => regions,
             Err(err) => {
@@ -416,31 +514,46 @@ impl RemoteDesktopEisState {
         connection: &Connection,
         state: &State,
         seat: &reis::request::Seat,
-        name: &str,
+        name: &'static str,
         capabilities: BitFlags<DeviceCapability>,
     ) {
         for region in self.window_regions.clone() {
-            let exists = self.window_devices.iter().any(|(device, existing)| {
-                *existing == region
+            let exists = self.window_devices.iter().any(|existing| {
+                existing.region == region
                     && capabilities
                         .iter()
-                        .all(|capability| device.has_capability(capability))
+                        .all(|capability| existing.device.has_capability(capability))
             });
-            if exists {
-                continue;
+            if !exists {
+                self.add_window_device(connection, state, seat, name, capabilities, region);
             }
+        }
+    }
 
-            let device = self.add_device(
-                connection,
-                state,
-                seat,
+    fn add_window_device(
+        &mut self,
+        connection: &Connection,
+        state: &State,
+        seat: &reis::request::Seat,
+        name: &'static str,
+        capabilities: BitFlags<DeviceCapability>,
+        region: EisRegion,
+    ) {
+        let device = self.add_device(
+            connection,
+            state,
+            seat,
+            name,
+            capabilities,
+            std::slice::from_ref(&region),
+        );
+        if let Some(device) = device {
+            self.window_devices.push(WindowDevice {
+                device,
+                region,
                 name,
                 capabilities,
-                std::slice::from_ref(&region),
-            );
-            if let Some(device) = device {
-                self.window_devices.push((device, region));
-            }
+            });
         }
     }
 
@@ -513,7 +626,7 @@ impl RemoteDesktopEisState {
         clear_matching_device(&mut self.pointer_absolute, &request.device);
         clear_matching_device(&mut self.touch, &request.device);
         self.window_devices
-            .retain(|(device, _)| *device != request.device);
+            .retain(|window_device| window_device.device != request.device);
     }
 
     fn absolute_position(
@@ -527,8 +640,8 @@ impl RemoteDesktopEisState {
             return None;
         }
 
-        if let Some((_, region)) = self.window_devices.iter().find(|(d, _)| d == device) {
-            return Some(region.position(x, y));
+        if let Some(window_device) = self.window_devices.iter().find(|d| d.device == *device) {
+            return Some(window_device.region.position(x, y));
         }
 
         let region = self.regions.iter().find(|region| {
@@ -619,9 +732,6 @@ fn normalize_region(
 }
 
 /// Window stream regions in logical pixels at the window's current output scale.
-///
-/// Like output regions, they are not updated when the window resizes; positions are clamped to
-/// the window when they are resolved.
 fn window_regions(state: &State, regions: &[RemoteDesktopWindowRegion]) -> Vec<EisRegion> {
     regions
         .iter()

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 
+use calloop::ping::Ping;
 use zbus::fdo;
 
 use super::clipboard::{RemoteDesktopClipboardOwner, RemoteDesktopClipboardSession};
@@ -67,6 +68,8 @@ pub(super) struct RemoteDesktopSession {
     pub(super) screen_cast_session: Option<CastSessionId>,
     pub(super) streams: HashMap<String, RemoteDesktopStream>,
     pub(super) clipboard: RemoteDesktopClipboardSession,
+    /// Wakes the session's EIS connections to re-advertise their window regions.
+    pub(super) eis_window_region_pings: Vec<Ping>,
 }
 
 impl Default for RemoteDesktopSessionRegistry {
@@ -233,6 +236,33 @@ impl RemoteDesktopSessionRegistry {
         })
     }
 
+    pub(super) fn add_eis_window_region_ping(
+        &self,
+        session_id: &str,
+        ping: Ping,
+    ) -> fdo::Result<()> {
+        self.with_session(session_id, |session| {
+            session.eis_window_region_pings.push(ping);
+            Ok(())
+        })
+    }
+
+    /// Wakes the EIS connections of the session that owns the window stream.
+    pub fn window_stream_resized(&self, stream_id: CastStreamId) {
+        let _ = self.with_sessions(|sessions| {
+            let session = sessions.values().find(|session| {
+                session.streams.values().any(|stream| {
+                    stream.stream_id == stream_id
+                        && matches!(stream.target, RemoteDesktopStreamTarget::Window { .. })
+                })
+            });
+            for ping in session.iter().flat_map(|s| &s.eis_window_region_pings) {
+                ping.ping();
+            }
+            Ok(())
+        });
+    }
+
     pub(super) fn with_sessions<T>(
         &self,
         f: impl FnOnce(&mut HashMap<String, RemoteDesktopSession>) -> fdo::Result<T>,
@@ -335,6 +365,8 @@ impl RemoteDesktopStream {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -528,5 +560,68 @@ mod tests {
         assert!(registry
             .stream_position(window_path, 0., f64::INFINITY)
             .is_err());
+    }
+
+    #[test]
+    fn registry_wakes_eis_connections_of_resized_window_streams() {
+        let registry = RemoteDesktopSessionRegistry::default();
+        let mut event_loop = calloop::EventLoop::<Vec<&str>>::try_new().unwrap();
+        let add_session = |name: &'static str| {
+            let screen_cast_session = CastSessionId::next();
+            registry
+                .insert_session(name.to_owned(), String::new())
+                .unwrap();
+            registry
+                .associate_screen_cast(name, screen_cast_session)
+                .unwrap();
+            let (ping, source) = calloop::ping::make_ping().unwrap();
+            event_loop
+                .handle()
+                .insert_source(source, move |(), &mut (), woken| woken.push(name))
+                .unwrap();
+            registry.add_eis_window_region_ping(name, ping).unwrap();
+            screen_cast_session
+        };
+        let first = add_session("first");
+        add_session("second");
+
+        let output_stream_id = CastStreamId::next();
+        let window_stream_id = CastStreamId::next();
+        registry
+            .register_stream(
+                first,
+                "/org/gnome/Mutter/ScreenCast/Stream/u1002".to_owned(),
+                RemoteDesktopStream::output(
+                    output_stream_id,
+                    RemoteDesktopOutputStream {
+                        name: "HDMI-A-1".to_owned(),
+                        x: 0,
+                        y: 0,
+                        width: 1920,
+                        height: 1080,
+                    },
+                ),
+            )
+            .unwrap();
+        registry
+            .register_stream(
+                first,
+                "/org/gnome/Mutter/ScreenCast/Stream/u1003".to_owned(),
+                RemoteDesktopStream::window(window_stream_id, 42),
+            )
+            .unwrap();
+
+        let mut woken = Vec::new();
+        registry.window_stream_resized(output_stream_id);
+        event_loop
+            .dispatch(Some(Duration::ZERO), &mut woken)
+            .unwrap();
+        assert!(woken.is_empty());
+
+        registry.window_stream_resized(window_stream_id);
+        event_loop
+            .dispatch(Some(Duration::ZERO), &mut woken)
+            .unwrap();
+        assert_eq!(woken, ["first"]);
     }
 }

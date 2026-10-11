@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
+use smithay::utils::{Physical, Size};
 use zbus::fdo::RequestNameFlags;
 use zbus::object_server::{InterfaceRef, SignalEmitter};
 use zbus::zvariant::{DeserializeDict, OwnedObjectPath, SerializeDict, Type, Value};
@@ -81,7 +82,11 @@ pub struct Stream {
 enum StreamTarget {
     // FIXME: update on scale changes and whatnot.
     Output(niri_ipc::Output),
-    Window { id: u64 },
+    Window {
+        id: u64,
+        /// Size of the stream buffer in physical pixels, once the window is known.
+        size: Option<(i32, i32)>,
+    },
 }
 
 #[derive(Debug, Default, DeserializeDict, Type)]
@@ -102,10 +107,10 @@ pub enum StreamTargetId {
 #[derive(Debug, SerializeDict, Type, Value)]
 #[zvariant(signature = "dict")]
 struct StreamParameters {
-    /// Position of the stream in logical coordinates.
-    position: (i32, i32),
-    /// Size of the stream in logical coordinates.
-    size: (i32, i32),
+    /// Position of a monitor stream in logical coordinates.
+    position: Option<(i32, i32)>,
+    /// Size of a monitor stream in logical coordinates, or of a window stream in buffer pixels.
+    size: Option<(i32, i32)>,
     /// Identifier of the matching libei region, for streams in a remote desktop session.
     #[zvariant(rename = "mapping-id")]
     mapping_id: Option<String>,
@@ -121,6 +126,10 @@ pub enum ScreenCastToNiri {
     },
     StopCast {
         session_id: CastSessionId,
+    },
+    WindowStreamSize {
+        window_id: u64,
+        reply: async_channel::Sender<Option<Size<i32, Physical>>>,
     },
 }
 
@@ -258,7 +267,7 @@ impl Session {
     }
 
     async fn record_monitor(
-        &mut self,
+        &self,
         #[zbus(object_server)] server: &ObjectServer,
         connector: &str,
         properties: RecordMonitorProperties,
@@ -278,8 +287,7 @@ impl Session {
 
         let stream_id = CastStreamId::next();
         let remote_stream = remote_desktop_output_stream(stream_id, &output)?;
-        let path = format!("/org/gnome/Mutter/ScreenCast/Stream/u{}", stream_id.get());
-        let path = object_path(path)?;
+        let path = object_path(stream_path(stream_id))?;
 
         let cursor_mode = properties.cursor_mode.unwrap_or_default();
 
@@ -316,21 +324,23 @@ impl Session {
         Ok(path)
     }
 
+    // Session methods take &self: record_window() waits for niri while holding a read lock on the
+    // interface, so a pending write lock would block Niri::stop_cast() and deadlock.
     async fn record_window(
-        &mut self,
+        &self,
         #[zbus(object_server)] server: &ObjectServer,
         properties: RecordWindowProperties,
     ) -> fdo::Result<OwnedObjectPath> {
         debug!(?properties, "record_window");
 
         let stream_id = CastStreamId::next();
-        let path = format!("/org/gnome/Mutter/ScreenCast/Stream/u{}", stream_id.get());
-        let path = object_path(path)?;
+        let path = object_path(stream_path(stream_id))?;
 
         let cursor_mode = properties.cursor_mode.unwrap_or_default();
 
         let target = StreamTarget::Window {
             id: properties.window_id,
+            size: self.window_stream_size(properties.window_id).await,
         };
         let stream = Stream::new(
             stream_id,
@@ -381,10 +391,10 @@ impl Stream {
     async fn parameters(&self) -> fdo::Result<StreamParameters> {
         let mut parameters = match &self.target {
             StreamTarget::Output(output) => output_stream_parameters(output)?,
-            // Does any consumer need this?
-            StreamTarget::Window { .. } => StreamParameters {
-                position: (0, 0),
-                size: (1, 1),
+            // Like Mutter, window streams have no position.
+            StreamTarget::Window { size, .. } => StreamParameters {
+                position: None,
+                size: *size,
                 mapping_id: None,
             },
         };
@@ -455,6 +465,17 @@ impl Session {
             .register_stream(self.id, path.as_str().to_owned(), stream)
     }
 
+    async fn window_stream_size(&self, window_id: u64) -> Option<(i32, i32)> {
+        let (reply, rx) = async_channel::bounded(1);
+        let msg = ScreenCastToNiri::WindowStreamSize { window_id, reply };
+        if let Err(err) = self.to_niri.send(msg) {
+            warn!("error sending WindowStreamSize to niri: {err:?}");
+            return None;
+        }
+        let size = rx.recv().await.ok().flatten()?;
+        Some((size.w, size.h))
+    }
+
     /// Matches the EIS region mapping id of the stream, like Mutter.
     fn mapping_id(&self, stream_id: CastStreamId) -> Option<String> {
         self.remote_desktop_session_id
@@ -492,6 +513,17 @@ impl Stream {
         }
     }
 
+    /// Returns whether the size changed.
+    fn set_window_size(&mut self, size: Size<i32, Physical>) -> bool {
+        let StreamTarget::Window { size: current, .. } = &mut self.target else {
+            return false;
+        };
+        let size = Some((size.w, size.h));
+        let changed = *current != size;
+        *current = size;
+        changed
+    }
+
     fn start(&self, ctxt: SignalEmitter<'static>) {
         if self.was_started.load(Ordering::SeqCst) {
             return;
@@ -511,15 +543,38 @@ impl Stream {
     }
 }
 
+/// Updates the `size` parameter of a window stream and notifies clients when it changed.
+pub fn set_window_stream_size(
+    server: &zbus::blocking::ObjectServer,
+    stream_id: CastStreamId,
+    size: Size<i32, Physical>,
+) {
+    let Ok(iface) = server.interface::<_, Stream>(stream_path(stream_id)) else {
+        return;
+    };
+
+    let mut stream = iface.get_mut();
+    if !stream.set_window_size(size) {
+        return;
+    }
+    if let Err(err) = async_io::block_on(stream.parameters_changed(iface.signal_emitter())) {
+        warn!("error emitting ScreenCast stream parameters change: {err:?}");
+    }
+}
+
 impl StreamTarget {
     fn make_id(&self) -> StreamTargetId {
         match self {
             StreamTarget::Output(output) => StreamTargetId::Output {
                 name: output.name.clone(),
             },
-            StreamTarget::Window { id } => StreamTargetId::Window { id: *id },
+            StreamTarget::Window { id, .. } => StreamTargetId::Window { id: *id },
         }
     }
+}
+
+fn stream_path(stream_id: CastStreamId) -> String {
+    format!("/org/gnome/Mutter/ScreenCast/Stream/u{}", stream_id.get())
 }
 
 fn object_path(path: String) -> fdo::Result<OwnedObjectPath> {
@@ -554,8 +609,8 @@ fn output_stream_parameters(output: &niri_ipc::Output) -> fdo::Result<StreamPara
         .as_ref()
         .ok_or_else(|| fdo::Error::Failed("monitor is disabled".to_owned()))?;
     Ok(StreamParameters {
-        position: (logical.x, logical.y),
-        size: logical_size(logical)?,
+        position: Some((logical.x, logical.y)),
+        size: Some(logical_size(logical)?),
         mapping_id: None,
     })
 }
@@ -572,4 +627,36 @@ fn logical_size(logical: &niri_ipc::LogicalOutput) -> fdo::Result<(i32, i32)> {
     let height = i32::try_from(logical.height)
         .map_err(|_| fdo::Error::Failed("logical output height is too large".to_owned()))?;
     Ok((width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window_stream(size: Option<(i32, i32)>) -> Stream {
+        let (to_niri, _) = calloop::channel::channel();
+        Stream::new(
+            CastStreamId::next(),
+            CastSessionId::next(),
+            StreamTarget::Window { id: 42, size },
+            CursorMode::Hidden,
+            Some("7".to_owned()),
+            to_niri,
+        )
+    }
+
+    #[test]
+    fn window_stream_parameters_report_the_window_size() {
+        let mut stream = window_stream(Some((800, 600)));
+
+        let parameters = async_io::block_on(stream.parameters()).unwrap();
+        assert_eq!(parameters.position, None);
+        assert_eq!(parameters.size, Some((800, 600)));
+        assert_eq!(parameters.mapping_id.as_deref(), Some("7"));
+
+        assert!(stream.set_window_size(Size::from((1000, 700))));
+        assert!(!stream.set_window_size(Size::from((1000, 700))));
+        let parameters = async_io::block_on(stream.parameters()).unwrap();
+        assert_eq!(parameters.size, Some((1000, 700)));
+    }
 }
