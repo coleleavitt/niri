@@ -1,13 +1,29 @@
-use niri_config::{Action, Config};
-use smithay::utils::{Point, Size};
+use std::io;
+use std::os::unix::net::UnixStream;
 
+use niri_config::{Action, Config};
+use reis::event::{DeviceCapability, EiEvent, EiEventConverter};
+use reis::handshake::EiHandshaker;
+use reis::{ei, PendingRequestResult};
+use smithay::utils::{Point, Size};
+use wayland_client::protocol::wl_surface::WlSurface;
+
+use super::client::ClientId;
 use super::*;
 use crate::dbus::mutter_remote_desktop::{
-    dispatch_to_niri, RemoteDesktopAbsolutePosition, RemoteDesktopToNiri,
+    dispatch_to_niri, RemoteDesktopAbsolutePosition, RemoteDesktopDeviceTypes,
+    RemoteDesktopEisConnection, RemoteDesktopSessionRegistry, RemoteDesktopStream,
+    RemoteDesktopToNiri,
 };
 use crate::dbus::mutter_screen_cast::ScreenCastToNiri;
+use crate::utils::{CastSessionId, CastStreamId};
 
 fn set_up() -> (Fixture, u64) {
+    let (f, window_id, _, _) = set_up_with_client();
+    (f, window_id)
+}
+
+fn set_up_with_client() -> (Fixture, u64, ClientId, WlSurface) {
     let config = Config::parse_mem(
         r#"
 output "headless-2" {
@@ -35,7 +51,7 @@ output "headless-2" {
     f.niri_complete_animations();
 
     let window_id = f.niri().layout.focus().unwrap().id().get();
-    (f, window_id)
+    (f, window_id, id, surface)
 }
 
 fn move_pointer(f: &mut Fixture, id: u64, x: f64, y: f64) {
@@ -123,4 +139,129 @@ fn window_stream_size_is_the_window_size_in_buffer_pixels() {
 
     // The window is 100×100 on an output with scale 2.
     assert_eq!(rx.try_recv().unwrap(), Some(Size::from((200, 200))));
+}
+
+/// Non-blocking libei sender client.
+struct EiClient {
+    context: ei::Context,
+    handshaker: EiHandshaker<'static>,
+    converter: Option<EiEventConverter>,
+}
+
+impl EiClient {
+    fn new(socket: UnixStream) -> Self {
+        Self {
+            context: ei::Context::new(socket).unwrap(),
+            handshaker: EiHandshaker::new("niri-test", ei::handshake::ContextType::Sender),
+            converter: None,
+        }
+    }
+
+    /// Dispatches niri and the client until the client receives an event.
+    fn next_event(&mut self, f: &mut Fixture) -> EiEvent {
+        for _ in 0..100 {
+            if let Some(event) = self.converter.as_mut().and_then(|c| c.next_event()) {
+                return event;
+            }
+
+            f.dispatch();
+            match self.context.read() {
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => (),
+                res => {
+                    res.unwrap();
+                }
+            }
+            while let Some(event) = self.context.pending_event() {
+                let PendingRequestResult::Request(event) = event else {
+                    panic!("invalid EIS event");
+                };
+                match &mut self.converter {
+                    Some(converter) => converter.handle_event(event).unwrap(),
+                    None => {
+                        if let Some(resp) = self.handshaker.handle_event(event).unwrap() {
+                            self.converter = Some(EiEventConverter::new(&self.context, resp));
+                        }
+                    }
+                }
+            }
+        }
+        panic!("no EIS event arrived");
+    }
+}
+
+#[test]
+fn eis_window_regions_are_readvertised_when_the_window_resizes() {
+    let (mut f, id, client_id, surface) = set_up_with_client();
+
+    let registry = RemoteDesktopSessionRegistry::default();
+    let session_id = "eis-session";
+    let screen_cast_session = CastSessionId::next();
+    let stream_id = CastStreamId::next();
+    registry
+        .insert_session(session_id.to_owned(), String::new())
+        .unwrap();
+    registry
+        .associate_screen_cast(session_id, screen_cast_session)
+        .unwrap();
+    registry
+        .register_stream(
+            screen_cast_session,
+            "/org/gnome/Mutter/ScreenCast/Stream/u1".to_owned(),
+            RemoteDesktopStream::window(stream_id, id),
+        )
+        .unwrap();
+
+    let (server, client) = UnixStream::pair().unwrap();
+    dispatch_to_niri(
+        f.niri_state(),
+        RemoteDesktopToNiri::ConnectEis(RemoteDesktopEisConnection::new(
+            server,
+            session_id.to_owned(),
+            registry.clone(),
+            RemoteDesktopDeviceTypes::default(),
+        )),
+    );
+    let mut client = EiClient::new(client);
+
+    let EiEvent::SeatAdded(seat) = client.next_event(&mut f) else {
+        panic!("expected a seat");
+    };
+    seat.seat
+        .bind_capabilities(DeviceCapability::PointerAbsolute | DeviceCapability::Button);
+    client.context.flush().unwrap();
+
+    let mapping_id = stream_id.get().to_string();
+    let window_device = |event| match event {
+        EiEvent::DeviceAdded(added) => {
+            let regions = added.device.regions();
+            let region = regions
+                .iter()
+                .find(|region| region.mapping_id.as_ref() == Some(&mapping_id))?;
+            Some((added.device.clone(), (region.width, region.height)))
+        }
+        _ => None,
+    };
+    let (old_device, size) = std::iter::repeat_with(|| client.next_event(&mut f))
+        .find_map(window_device)
+        .unwrap();
+    assert_eq!(size, (100, 100));
+
+    let window = f.client(client_id).window(&surface);
+    window.set_size(150, 120);
+    window.commit();
+    f.double_roundtrip(client_id);
+    registry.window_stream_resized(stream_id);
+
+    let mut removed = false;
+    let (new_device, size) = std::iter::repeat_with(|| client.next_event(&mut f))
+        .find_map(|event| {
+            if let EiEvent::DeviceRemoved(event) = &event {
+                removed |= event.device == old_device;
+            }
+            window_device(event)
+        })
+        .unwrap();
+    assert!(removed);
+    assert_ne!(new_device, old_device);
+    assert_eq!(size, (150, 120));
 }

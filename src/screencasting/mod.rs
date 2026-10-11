@@ -805,6 +805,9 @@ impl Niri {
         if let Some(conn) = &dbus.conn_screen_cast {
             mutter_screen_cast::set_window_stream_size(&conn.object_server(), stream_id, size);
         }
+        if let Some(sessions) = &dbus.remote_desktop_sessions {
+            sessions.window_stream_resized(stream_id);
+        }
     }
 
     fn cast_params_for_window(&self, window_id: u64) -> Option<(Size<i32, Physical>, u32)> {
