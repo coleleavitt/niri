@@ -150,6 +150,8 @@ enum CastState {
 #[derive(PartialEq, Eq)]
 pub enum CastSizeChange {
     Ready,
+    /// The stream was just asked to change to the new size.
+    ResizeStarted,
     Pending,
 }
 
@@ -869,7 +871,7 @@ impl Cast {
             .update_params(params)
             .context("error updating stream params")?;
 
-        Ok(CastSizeChange::Pending)
+        Ok(CastSizeChange::ResizeStarted)
     }
 
     pub fn set_refresh(&mut self, refresh: u32) -> anyhow::Result<()> {

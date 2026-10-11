@@ -1,10 +1,11 @@
 use niri_config::{Action, Config};
-use smithay::utils::Point;
+use smithay::utils::{Point, Size};
 
 use super::*;
 use crate::dbus::mutter_remote_desktop::{
     dispatch_to_niri, RemoteDesktopAbsolutePosition, RemoteDesktopToNiri,
 };
+use crate::dbus::mutter_screen_cast::ScreenCastToNiri;
 
 fn set_up() -> (Fixture, u64) {
     let config = Config::parse_mem(
@@ -107,4 +108,19 @@ fn window_stream_pointer_motion_is_dropped_while_virtual_input_is_blocked() {
         .do_action(Action::ToggleVirtualInputBlocked, false);
     move_pointer(&mut f, id, 50., 50.);
     assert_ne!(pointer_location(&mut f), before);
+}
+
+#[test]
+fn window_stream_size_is_the_window_size_in_buffer_pixels() {
+    let (mut f, id) = set_up();
+
+    let (reply, rx) = async_channel::bounded(1);
+    f.niri_state()
+        .on_screen_cast_msg(ScreenCastToNiri::WindowStreamSize {
+            window_id: id,
+            reply,
+        });
+
+    // The window is 100×100 on an output with scale 2.
+    assert_eq!(rx.try_recv().unwrap(), Some(Size::from((200, 200))));
 }

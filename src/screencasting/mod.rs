@@ -191,6 +191,10 @@ impl State {
 
             match cast.ensure_size(bbox.size) {
                 Ok(CastSizeChange::Ready) => (),
+                Ok(CastSizeChange::ResizeStarted) => {
+                    self.niri.cast_resized(cast.stream_id, bbox.size);
+                    break;
+                }
                 Ok(CastSizeChange::Pending) => break,
                 Err(err) => {
                     warn!("error updating stream size, stopping screencast: {err:?}");
@@ -353,6 +357,7 @@ impl State {
 
         // Start each pending cast.
         let mut to_stop = HashSet::new();
+        let mut started = Vec::new();
         for pending in self.niri.casting.pending_dynamic_casts.drain(..) {
             let res = pw.start_cast(
                 gbm.clone(),
@@ -369,6 +374,7 @@ impl State {
             match res {
                 Ok(mut cast) => {
                     cast.dynamic_target = true;
+                    started.push(cast.stream_id);
                     self.niri.casting.casts.push(cast);
                 }
                 Err(err) => {
@@ -378,6 +384,9 @@ impl State {
             }
         }
 
+        for stream_id in started {
+            self.niri.cast_resized(stream_id, size);
+        }
         for session_id in to_stop {
             self.niri.stop_cast(session_id);
         }
@@ -454,6 +463,9 @@ impl State {
                 );
                 match res {
                     Ok(cast) => {
+                        // Window streams report their size, which may have changed since
+                        // RecordWindow.
+                        self.niri.cast_resized(stream_id, size);
                         self.niri.casting.casts.push(cast);
                     }
                     Err(err) => {
@@ -463,6 +475,13 @@ impl State {
                 }
             }
             ScreenCastToNiri::StopCast { session_id } => self.niri.stop_cast(session_id),
+            ScreenCastToNiri::WindowStreamSize { window_id, reply } => {
+                let size = self
+                    .niri
+                    .cast_params_for_window(window_id)
+                    .map(|(size, _)| size);
+                let _ = reply.try_send(size);
+            }
         }
     }
 }
@@ -564,6 +583,10 @@ impl Niri {
 
             match cast.ensure_size(size) {
                 Ok(CastSizeChange::Ready) => (),
+                Ok(CastSizeChange::ResizeStarted) => {
+                    self.cast_resized(cast.stream_id, size);
+                    continue;
+                }
                 Ok(CastSizeChange::Pending) => continue,
                 Err(err) => {
                     warn!("error updating stream size, stopping screencast: {err:?}");
@@ -654,6 +677,10 @@ impl Niri {
 
             match cast.ensure_size(bbox.size) {
                 Ok(CastSizeChange::Ready) => (),
+                Ok(CastSizeChange::ResizeStarted) => {
+                    self.cast_resized(cast.stream_id, bbox.size);
+                    continue;
+                }
                 Ok(CastSizeChange::Pending) => continue,
                 Err(err) => {
                     warn!("error updating stream size, stopping screencast: {err:?}");
@@ -767,6 +794,16 @@ impl Niri {
         if saw_dynamic {
             self.event_loop
                 .insert_idle(|state| state.set_dynamic_cast_target(CastTarget::Nothing));
+        }
+    }
+
+    /// Tells clients of a window stream about the new size of its buffers.
+    fn cast_resized(&self, stream_id: CastStreamId, size: Size<i32, Physical>) {
+        let Some(dbus) = &self.dbus else {
+            return;
+        };
+        if let Some(conn) = &dbus.conn_screen_cast {
+            mutter_screen_cast::set_window_stream_size(&conn.object_server(), stream_id, size);
         }
     }
 
