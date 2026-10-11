@@ -1,5 +1,5 @@
 use std::cmp::min;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Write as _;
 use std::os::unix::net::UnixStream;
@@ -51,6 +51,7 @@ use wayland_client::protocol::wl_buffer::{self, WlBuffer};
 use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_display::WlDisplay;
+use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
 use wayland_client::protocol::wl_output::{self, WlOutput};
 use wayland_client::protocol::wl_pointer::{self, WlPointer};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
@@ -70,6 +71,8 @@ pub struct Client {
     pub qh: QueueHandle<State>,
     pub display: WlDisplay,
     pub state: State,
+    /// Whether the compositor is expected to disconnect this client with a protocol error.
+    pub expect_protocol_error: bool,
 }
 
 pub struct State {
@@ -91,6 +94,10 @@ pub struct State {
     /// Surface with pointer focus and the serial of its enter event.
     pub pointer_focus: Option<(WlSurface, u32)>,
     pub pointer_location: (f64, f64),
+    pub keyboard: Option<WlKeyboard>,
+    /// Keys this client considers held, from wl_keyboard enter, key and leave events.
+    pub pressed_keys: HashSet<u32>,
+    pub mods_depressed: u32,
     pub virtual_pointer_manager: Option<ZwlrVirtualPointerManagerV1>,
     pub virtual_keyboard_manager: Option<ZwpVirtualKeyboardManagerV1>,
 
@@ -247,6 +254,9 @@ impl Client {
             pointer: None,
             pointer_focus: None,
             pointer_location: (0., 0.),
+            keyboard: None,
+            pressed_keys: HashSet::new(),
+            mods_depressed: 0,
             virtual_pointer_manager: None,
             virtual_keyboard_manager: None,
             windows: Vec::new(),
@@ -261,6 +271,7 @@ impl Client {
             qh,
             display,
             state,
+            expect_protocol_error: false,
         }
     }
 
@@ -270,7 +281,7 @@ impl Client {
             .unwrap();
 
         if let Some(error) = self.connection.protocol_error() {
-            panic!("{error}");
+            assert!(self.expect_protocol_error, "{error}");
         }
     }
 
@@ -358,6 +369,11 @@ impl Client {
     pub fn create_pointer(&mut self) {
         let seat = self.state.seat.as_ref().unwrap();
         self.state.pointer = Some(seat.get_pointer(&self.qh, ()));
+    }
+
+    pub fn create_keyboard(&mut self) {
+        let seat = self.state.seat.as_ref().unwrap();
+        self.state.keyboard = Some(seat.get_keyboard(&self.qh, ()));
     }
 
     pub fn warp_pointer(&self, surface: &WlSurface, x: f64, y: f64, serial: u32) {
@@ -1105,6 +1121,45 @@ impl Dispatch<WlPointer, ()> for State {
                 surface_y,
                 ..
             } => state.pointer_location = (surface_x, surface_y),
+            _ => (),
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for State {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlKeyboard,
+        event: <WlKeyboard as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_keyboard::Event::Enter { keys, .. } => {
+                state.pressed_keys = keys
+                    .chunks_exact(4)
+                    .map(|key| u32::from_ne_bytes(key.try_into().unwrap()))
+                    .collect();
+            }
+            wl_keyboard::Event::Leave { .. } => {
+                state.pressed_keys.clear();
+                state.mods_depressed = 0;
+            }
+            wl_keyboard::Event::Key {
+                key,
+                state: key_state,
+                ..
+            } => {
+                if key_state == WEnum::Value(wl_keyboard::KeyState::Pressed) {
+                    state.pressed_keys.insert(key);
+                } else {
+                    state.pressed_keys.remove(&key);
+                }
+            }
+            wl_keyboard::Event::Modifiers { mods_depressed, .. } => {
+                state.mods_depressed = mods_depressed;
+            }
             _ => (),
         }
     }

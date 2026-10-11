@@ -1,5 +1,9 @@
+use std::collections::HashSet;
+
 use niri_config::Action;
 use niri_ipc::VirtualInput;
+use smithay::input::keyboard::{xkb, KeymapFile};
+use wayland_client::protocol::wl_keyboard::KeymapFormat;
 use wayland_client::protocol::wl_pointer::ButtonState;
 
 use super::*;
@@ -78,6 +82,51 @@ fn virtual_keyboard_is_tracked_per_client() {
     let state = virtual_input(&mut f);
     assert_eq!(state.virtual_keyboard_clients, 1);
     assert!(state.active);
+}
+
+#[test]
+fn revoke_releases_virtual_keyboard_keys() {
+    let mut f = Fixture::new();
+    f.add_output(1, (1920, 1080));
+
+    let id = f.add_client();
+    let window = f.client(id).create_window();
+    let surface = window.surface.clone();
+    window.commit();
+    f.roundtrip(id);
+    let window = f.client(id).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.client(id).create_keyboard();
+    f.double_roundtrip(id);
+
+    let typist = f.add_client();
+    let keyboard = f.client(typist).create_virtual_keyboard();
+    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+    let keymap =
+        xkb::Keymap::new_from_names(&context, "", "", "", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)
+            .unwrap();
+    KeymapFile::new(&keymap)
+        .with_fd(false, |fd, size| {
+            keyboard.keymap(KeymapFormat::XkbV1 as u32, fd, size as u32);
+        })
+        .unwrap();
+    // Shift and A.
+    keyboard.modifiers(1, 0, 0, 0);
+    keyboard.key(0, 30, 1);
+    f.roundtrip(typist);
+    f.roundtrip(id);
+    let state = &f.client(id).state;
+    assert_eq!(state.pressed_keys, HashSet::from([30]));
+    assert_eq!(state.mods_depressed, 1);
+
+    // Revoking disconnects the virtual keyboard client.
+    f.client(typist).expect_protocol_error = true;
+    f.niri_state().do_action(Action::RevokeVirtualInput, false);
+    f.roundtrip(id);
+    let state = &f.client(id).state;
+    assert!(state.pressed_keys.is_empty());
+    assert_eq!(state.mods_depressed, 0);
 }
 
 #[test]
